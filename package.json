@@ -1,0 +1,12 @@
+{
+  "name": "bot",
+  "version": "1.0.0",
+  "description": "LONOO bot for GitHub Actions",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "puppeteer": "^22.0.0"
+  }
+}
