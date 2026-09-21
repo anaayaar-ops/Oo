@@ -8,7 +8,7 @@ const os = require('os');
 // ═══════════════════════════════════════════════════════════════
 const TOKEN_HOST = "WE-dab4a6ab-9a11-4f0c-97c6-9f63b74f2831";
 const USER_ID_HOST = 80055399;
-const TOKEN_GUEST = "WE-01f850bf-5fec-4d59-baf7-f180577521cc";
+const TOKEN_GUEST = "WE-a4867dbc-6330-4cfc-9fbb-fdae78bc4466";
 const USER_ID_GUEST = 51660277;
 const GROUP_ID = 18432094;
 
