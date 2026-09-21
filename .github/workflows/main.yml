@@ -1,0 +1,80 @@
+name: Continuous Bot Runner
+
+on:
+  schedule:
+    - cron: '0 21,1,5,9,13,17 * * *'   # بتوقيت مكة: 12ص, 4ص, 8ص, 12م, 4م, 8م
+  workflow_dispatch:
+
+concurrency:
+  group: wolf-bot-running
+  cancel-in-progress: true
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Cache Puppeteer
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/puppeteer
+            node_modules
+          key: ${{ runner.os }}-puppeteer-${{ hashFiles('package-lock.json', 'package.json') }}
+          restore-keys: |
+            ${{ runner.os }}-puppeteer-
+
+      - name: Install dependencies
+        run: |
+          npm install
+          npx puppeteer browsers install chrome
+
+      - name: Execution Logic
+        env:
+          GITHUB_PAT: ${{ secrets.GITHUB_PAT }}
+          TOKEN_1: ${{ secrets.TOKEN_1 }}
+          TOKEN_2: ${{ secrets.TOKEN_2 }}
+          USER_ID_1: ${{ secrets.USER_ID_1 }}
+          USER_ID_2: ${{ secrets.USER_ID_2 }}
+          GROUP_ID: ${{ secrets.GROUP_ID }}
+        run: |
+          echo "🚀 بدء التشغيل لمدة 6 ساعات (21600 ثانية)..."
+
+          # تشغيل البوت
+          node bot.js &
+          BOT_PID=$!
+          echo "📌 BOT PID: $BOT_PID"
+
+          # دالة التنظيف عند الإيقاف
+          cleanup() {
+            echo "🧹 تنظيف..."
+            kill -TERM $BOT_PID 2>/dev/null || true
+            pkill -f chrome 2>/dev/null || true
+            pkill -f chromium 2>/dev/null || true
+            wait $BOT_PID 2>/dev/null || true
+            echo "✅ تم التنظيف"
+          }
+          trap cleanup EXIT INT TERM
+
+          # انتظار 6 ساعات مع فحص دوري
+          END_TIME=$(( $(date +%s) + 21600 ))
+          while [ "$(date +%s)" -lt "$END_TIME" ]; do
+            # تحقق أن البوت لا يزال يعمل
+            if ! kill -0 $BOT_PID 2>/dev/null; then
+              echo "⚠️ البوت توقف قبل الوقت المتوقع"
+              break
+            fi
+            sleep 60
+          done
+
+          echo "🛑 انتهت الـ 6 ساعات، إغلاق الجلسة..."
+          cleanup
