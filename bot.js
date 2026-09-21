@@ -4,9 +4,9 @@ const fs = require('fs');
 const os = require('os');
 
 // ═══════════════════════════════════════════════════════════════
-// إعدادات GitHub — جلب التوكنات (اسم وهمي لتجنب الحظر)
+// إعدادات GitHub — جلب التوكنات باستخدام BOT_SECRET_KEY
 // ═══════════════════════════════════════════════════════════════
-const BOT_SECRET_KEY = process.env.BOT_SECRET_KEY; // تم تغيير الاسم هنا
+const BOT_SECRET_KEY = process.env.BOT_SECRET_KEY; 
 const GITHUB_OWNER = "anaayaar-ops";
 const TOKEN_REPO_HOST = "too";
 const TOKEN_REPO_GUEST = "ono";
@@ -88,7 +88,7 @@ function deleteTempDir(dir) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// GitHub: جلب التوكنات من المستودعات الخاصة (خيار احتياطي)
+// GitHub: جلب التوكنات من المستودعات الخاصة
 // ═══════════════════════════════════════════════════════════════
 async function fetchTokenFromGitHub(repo, accountName) {
     const url = `https://api.github.com/repos/${GITHUB_OWNER}/${repo}/contents/${TOKEN_FILE}`;
@@ -99,7 +99,7 @@ async function fetchTokenFromGitHub(repo, accountName) {
             headers: {
                 'Authorization': `Bearer ${BOT_SECRET_KEY}`,
                 'Accept': 'application/vnd.github.v3+json',
-                'User-Agent': 'Mozilla/5.0 (compatible; Bot/1.0)', // تم تحسينه لتجنب الفلترة
+                'User-Agent': 'Mozilla/5.0 (compatible; Bot/1.0)',
                 'X-GitHub-Api-Version': '2022-11-28'
             }
         });
@@ -148,34 +148,23 @@ async function fetchTokenFromGitHub(repo, accountName) {
 }
 
 async function loadTokens() {
-    console.log("\n========== جلب التوكنات ==========");
+    console.log("\n========== جلب التوكنات من GitHub ==========");
 
-    // 1. المحاولة الأولى: الجلب المباشر من متغيرات البيئة (الحل الآمن لتجنب الحظر)
-    if (process.env.TOKEN_HOST && process.env.TOKEN_GUEST) {
-        TOKEN_HOST = process.env.TOKEN_HOST;
-        TOKEN_GUEST = process.env.TOKEN_GUEST;
-        console.log("✅ تم تحميل التوكنين مباشرة من متغيرات البيئة (آمن)");
-        console.log(`   [المنشئ]: ${TOKEN_HOST.slice(0, 25)}...`);
-        console.log(`   [الضيف]: ${TOKEN_GUEST.slice(0, 25)}...\n`);
-        return;
+    // التحقق من وجود BOT_SECRET_KEY
+    if (!BOT_SECRET_KEY) {
+        throw new Error("❌ لم يتم العثور على BOT_SECRET_KEY في متغيرات البيئة. يرجى إضافته إلى أسرار GitHub (Secrets).");
     }
 
-    // 2. المحاولة الثانية: إذا لم تتوفر متغيرات البيئة، استخدم GitHub كخيار احتياطي
-    if (BOT_SECRET_KEY) {
-        console.log("⚠️ لم يتم العثور على TOKEN_HOST/TOKEN_GUEST في البيئة، محاولة الجلب من GitHub...");
-        const hostToken = await fetchTokenFromGitHub(TOKEN_REPO_HOST, "المنشئ (80055399)");
-        if (hostToken) TOKEN_HOST = hostToken;
+    // جلب التوكنات مباشرة من GitHub
+    const hostToken = await fetchTokenFromGitHub(TOKEN_REPO_HOST, "المنشئ (80055399)");
+    if (!hostToken) throw new Error("فشل جلب توكن المنشئ من GitHub");
+    TOKEN_HOST = hostToken;
 
-        const guestToken = await fetchTokenFromGitHub(TOKEN_REPO_GUEST, "الضيف (51660277)");
-        if (guestToken) TOKEN_GUEST = guestToken;
-    }
+    const guestToken = await fetchTokenFromGitHub(TOKEN_REPO_GUEST, "الضيف (51660277)");
+    if (!guestToken) throw new Error("فشل جلب توكن الضيف من GitHub");
+    TOKEN_GUEST = guestToken;
 
-    // التحقق النهائي
-    if (!TOKEN_HOST || !TOKEN_GUEST) {
-        throw new Error("❌ فشل جلب التوكنات. يرجى وضع TOKEN_HOST و TOKEN_GUEST في متغيرات البيئة.");
-    }
-
-    console.log("✅ تم تحميل التوكنين بنجاح\n");
+    console.log("✅ تم تحميل التوكنين بنجاح من GitHub\n");
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -947,7 +936,7 @@ async function runForever() {
             console.log(`🚀 بدء التشغيل (محاولة #${attempt})`);
             console.log(`${'═'.repeat(60)}\n`);
 
-            // 🔑 جلب التوكنات (من البيئة أولاً ثم GitHub)
+            // 🔑 جلب التوكنات من GitHub باستخدام BOT_SECRET_KEY
             try {
                 await loadTokens();
             } catch (tokenErr) {
