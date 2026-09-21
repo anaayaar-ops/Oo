@@ -1,0 +1,5 @@
+node_modules/
+chrome-profile-account1/
+chrome-profile-account2/
+*.log
+.DS_Store
