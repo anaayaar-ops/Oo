@@ -4,23 +4,11 @@ const fs = require('fs');
 const os = require('os');
 
 // ═══════════════════════════════════════════════════════════════
-// إعدادات GitHub — جلب التوكنات باستخدام BOT_SECRET_KEY
+// بيانات الحسابات
 // ═══════════════════════════════════════════════════════════════
-const BOT_SECRET_KEY = process.env.BOT_SECRET_KEY; 
-const GITHUB_OWNER = "anaayaar-ops";
-const TOKEN_REPO_HOST = "too";
-const TOKEN_REPO_GUEST = "ono";
-const TOKEN_FILE = "tokens.json";
-const TOKEN_FIELD = "v3APIToken";
-
-// متغيرات التوكنات (تُملأ تلقائياً)
-let TOKEN_HOST = null;
-let TOKEN_GUEST = null;
-
-// ═══════════════════════════════════════════════════════════════
-// معرفات المستخدمين
-// ═══════════════════════════════════════════════════════════════
+const TOKEN_HOST = "WE-dab4a6ab-9a11-4f0c-97c6-9f63b74f2831";
 const USER_ID_HOST = 80055399;
+const TOKEN_GUEST = "WE-01f850bf-5fec-4d59-baf7-f180577521cc";
 const USER_ID_GUEST = 51660277;
 const GROUP_ID = 18432094;
 
@@ -88,86 +76,6 @@ function deleteTempDir(dir) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// GitHub: جلب التوكنات من المستودعات الخاصة
-// ═══════════════════════════════════════════════════════════════
-async function fetchTokenFromGitHub(repo, accountName) {
-    const url = `https://api.github.com/repos/${GITHUB_OWNER}/${repo}/contents/${TOKEN_FILE}`;
-    console.log(`[GitHub] جلب ${accountName} من ${GITHUB_OWNER}/${repo}...`);
-
-    try {
-        const res = await fetch(url, {
-            headers: {
-                'Authorization': `Bearer ${BOT_SECRET_KEY}`,
-                'Accept': 'application/vnd.github.v3+json',
-                'User-Agent': 'Mozilla/5.0 (compatible; Bot/1.0)',
-                'X-GitHub-Api-Version': '2022-11-28'
-            }
-        });
-
-        if (!res.ok) {
-            const text = await res.text();
-            // إذا فشل Bearer، جرب token
-            if (res.status === 401) {
-                console.log(`[GitHub] محاولة ثانية بـ "token"...`);
-                const res2 = await fetch(url, {
-                    headers: {
-                        'Authorization': `token ${BOT_SECRET_KEY}`,
-                        'Accept': 'application/vnd.github.v3+json',
-                        'User-Agent': 'Mozilla/5.0 (compatible; Bot/1.0)',
-                        'X-GitHub-Api-Version': '2022-11-28'
-                    }
-                });
-                if (!res2.ok) throw new Error(`GitHub ${res2.status}: ${(await res2.text()).slice(0, 200)}`);
-                const data2 = await res2.json();
-                const content2 = Buffer.from(data2.content, 'base64').toString('utf-8');
-                const json2 = JSON.parse(content2);
-                const token2 = json2[TOKEN_FIELD];
-                if (!token2) throw new Error(`"${TOKEN_FIELD}" مفقود`);
-                console.log(`[GitHub] ✅ ${accountName}: ${token2.slice(0, 25)}...`);
-                return token2;
-            }
-            throw new Error(`GitHub ${res.status}: ${text.slice(0, 200)}`);
-        }
-
-        const data = await res.json();
-
-        // فك base64
-        const content = Buffer.from(data.content, 'base64').toString('utf-8');
-        const json = JSON.parse(content);
-
-        const token = json[TOKEN_FIELD];
-        if (!token) throw new Error(`الحقل "${TOKEN_FIELD}" غير موجود`);
-
-        console.log(`[GitHub] ✅ ${accountName}: ${token.slice(0, 25)}...`);
-        console.log(`         محدّث: ${json.updatedAt || 'N/A'}`);
-        return token;
-    } catch (e) {
-        console.error(`[GitHub] ❌ فشل ${accountName}:`, e.message);
-        return null;
-    }
-}
-
-async function loadTokens() {
-    console.log("\n========== جلب التوكنات من GitHub ==========");
-
-    // التحقق من وجود BOT_SECRET_KEY
-    if (!BOT_SECRET_KEY) {
-        throw new Error("❌ لم يتم العثور على BOT_SECRET_KEY في متغيرات البيئة. يرجى إضافته إلى أسرار GitHub (Secrets).");
-    }
-
-    // جلب التوكنات مباشرة من GitHub
-    const hostToken = await fetchTokenFromGitHub(TOKEN_REPO_HOST, "المنشئ (80055399)");
-    if (!hostToken) throw new Error("فشل جلب توكن المنشئ من GitHub");
-    TOKEN_HOST = hostToken;
-
-    const guestToken = await fetchTokenFromGitHub(TOKEN_REPO_GUEST, "الضيف (51660277)");
-    if (!guestToken) throw new Error("فشل جلب توكن الضيف من GitHub");
-    TOKEN_GUEST = guestToken;
-
-    console.log("✅ تم تحميل التوكنين بنجاح من GitHub\n");
-}
-
-// ═══════════════════════════════════════════════════════════════
 // API: الجلسات
 // ═══════════════════════════════════════════════════════════════
 async function createSession(token, name) {
@@ -217,8 +125,8 @@ async function deleteSession(token, st) {
 // ═══════════════════════════════════════════════════════════════
 async function leaveFromBothAccounts(lobbyId) {
     console.log(`🚪 مغادرة ${lobbyId} من الحسابين...`);
-
-    // المنشئ
+    
+    // المنشئ - DELETE /user
     try {
         const r1 = await fetch(`https://experience.palringo.com/lobby/id/${lobbyId}/user`, {
             method: "DELETE",
@@ -227,7 +135,7 @@ async function leaveFromBothAccounts(lobbyId) {
         console.log(`   [المنشئ] leave → ${r1.status}`);
     } catch (e) {}
 
-    // الضيف
+    // الضيف - DELETE /user
     try {
         const r2 = await fetch(`https://experience.palringo.com/lobby/id/${lobbyId}/user`, {
             method: "DELETE",
@@ -236,7 +144,7 @@ async function leaveFromBothAccounts(lobbyId) {
         console.log(`   [الضيف] leave → ${r2.status}`);
     } catch (e) {}
 
-    // close
+    // محاولة close أيضاً
     try {
         const r3 = await fetch(`https://experience.palringo.com/lobby/id/${lobbyId}/close`, {
             method: "POST",
@@ -291,7 +199,7 @@ async function closeLobby(token, lobbyId) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// API: Rematch (مرة واحدة) مع معالجة code 55 و 5
+// API: Rematch — مرة واحدة فقط + معالجة code 55
 // ═══════════════════════════════════════════════════════════════
 async function rematchLobby(token, lobbyId) {
     const headers = { ...baseHeaders, "authorization": `Bearer ${token}` };
@@ -300,21 +208,21 @@ async function rematchLobby(token, lobbyId) {
         const res = await fetch(`https://experience.palringo.com/lobby/id/${lobbyId}/rematch`, {
             method: "POST", headers, body
         });
-
+        
         if (!res.ok) {
             const text = await res.text();
             let err = {};
             try { err = JSON.parse(text); } catch (e) {}
-
+            
             console.log(`⚠️ Rematch فشل: ${res.status} code=${err.code} ${(err.message || '').slice(0, 100)}`);
-
-            // code 55 = اللوبي مفتوح
+            
+            // code 55 = اللوبي في حالة 'open' → استخدمه مباشرة
             if (err.code === 55) {
                 console.log(`💡 اللوبي ${lobbyId} مفتوح → نستخدمه مباشرة`);
                 return lobbyId;
             }
-
-            // code 5 = عالق في لوبي آخر
+            
+            // code 5 = المستخدم عالق في لوبي آخر
             if (err.code === 5) {
                 const m = (err.message || '').match(/Lobby, id (\d+)/);
                 if (m && m[1] === String(lobbyId)) {
@@ -322,10 +230,10 @@ async function rematchLobby(token, lobbyId) {
                     return lobbyId;
                 }
             }
-
+            
             return null;
         }
-
+        
         const data = await res.json();
         console.log(`🔄 Rematch → ${data.id}`);
         return data.id;
@@ -355,20 +263,23 @@ async function joinLobby(token, lobbyId, accountName = "guest") {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// إنشاء لوبي ذكي — Rematch مرة واحدة، ثم مغادرة + إنشاء
+// إنشاء لوبي ذكي — Rematch مرة واحدة، ثم مغادرة + إنشاء جديد
 // ═══════════════════════════════════════════════════════════════
 async function createLobbySmart(token, oldLobbyId = null) {
-    // 1) Rematch مرة واحدة
+    // ═══ 1) محاولة Rematch مرة واحدة فقط ═══
     if (oldLobbyId) {
         console.log(`🔄 Rematch (مرة واحدة) على ${oldLobbyId}...`);
         const newId = await rematchLobby(token, oldLobbyId);
-        if (newId) return { id: newId, usedRematch: true };
+        if (newId) {
+            return { id: newId, usedRematch: true };
+        }
 
+        // ❌ فشل → مغادرة فورية من الحسابين
         console.log(`⚠️ Rematch فشل → مغادرة فورية من الحسابين`);
         await leaveFromBothAccounts(oldLobbyId);
     }
 
-    // 2) إنشاء لوبي جديد (3 محاولات)
+    // ═══ 2) إنشاء لوبي جديد (3 محاولات فقط) ═══
     for (let i = 1; i <= MAX_LOBBY_ATTEMPTS; i++) {
         console.log(`📄 محاولة إنشاء لوبي ${i}/${MAX_LOBBY_ATTEMPTS}...`);
         const result = await createLobbyRaw(token);
@@ -419,7 +330,7 @@ async function navigateToMainPage(page, token) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// WS Monitor
+// WS Monitor — يراقب edgegap فقط
 // ═══════════════════════════════════════════════════════════════
 async function installWebSocketMonitor(page) {
     await page.evaluateOnNewDocument(() => {
@@ -438,10 +349,10 @@ async function installWebSocketMonitor(page) {
         window.WebSocket = function(url, protocols) {
             const M = window.__gameMonitor;
             const isGameWs = /edgegap\.net/i.test(url);
-
+            
             M.allWsUrls.push({ url, isGameWs, t: Date.now() });
             console.log(`🔌 ${isGameWs ? '🎮 GAME' : '⚙️ LOBBY'}: ${url.slice(0, 60)}...`);
-
+            
             const ws = new OrigWS(url, protocols);
 
             ws.addEventListener('open', () => {
@@ -569,18 +480,18 @@ async function waitForGameStart(page1, page2, maxWait) {
     console.log(`⏳ انتظار بدء اللعبة (edgegap WS)...`);
     const start = Date.now();
     let lastLog = 0;
-
+    
     while (Date.now() - start < maxWait) {
         const m1 = await getMonitor(page1);
         const m2 = await getMonitor(page2);
         const m = m1?.connectCount > 0 ? m1 : (m2?.connectCount > 0 ? m2 : null);
-
+        
         if (m && m.connected && m.connectCount >= 1) {
             const elapsed = ((Date.now() - start) / 1000).toFixed(1);
             console.log(`✅ بدأت اللعبة بعد ${elapsed}s`);
             return true;
         }
-
+        
         const elapsed = Math.floor((Date.now() - start) / 1000);
         if (elapsed >= lastLog + 5) {
             lastLog = elapsed;
@@ -763,27 +674,19 @@ class RunContext {
 
     async fullRestart() {
         console.log("\n🔁 إعادة تشغيل كاملة...");
-
-        // 🔑 إعادة جلب التوكنات من GitHub
-        try {
-            await loadTokens();
-        } catch (e) {
-            console.error("⚠️ فشل جلب التوكنات، استخدام القديمة:", e.message);
-        }
-
         const oldB1 = this.browser1, oldB2 = this.browser2;
         const oldT1 = this.tempDir1, oldT2 = this.tempDir2;
-
+        
         this.browser1 = null; this.browser2 = null;
         this.tempDir1 = null; this.tempDir2 = null;
         this.page1 = null; this.page2 = null;
         this.sessionHost = null; this.sessionGuest = null;
-
+        
         try { if (oldB1) await oldB1.close(); } catch (e) {}
         try { if (oldB2) await oldB2.close(); } catch (e) {}
         if (oldT1) deleteTempDir(oldT1);
         if (oldT2) deleteTempDir(oldT2);
-
+        
         await this.init();
     }
 }
@@ -856,7 +759,7 @@ async function runForever() {
             if (!result.started) {
                 console.log(`⚠️ فشل البدء (${result.reason})`);
                 consecutiveFailures++;
-
+                
                 const setup = await createLobbySmart(TOKEN_HOST, null);
                 if (setup) {
                     lobbyId = setup.id;
@@ -925,7 +828,7 @@ async function runForever() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// نقطة البداية — جلب التوكنات أولاً
+// نقطة البداية
 // ═══════════════════════════════════════════════════════════════
 (async () => {
     let attempt = 0;
@@ -935,17 +838,6 @@ async function runForever() {
             console.log(`\n${'═'.repeat(60)}`);
             console.log(`🚀 بدء التشغيل (محاولة #${attempt})`);
             console.log(`${'═'.repeat(60)}\n`);
-
-            // 🔑 جلب التوكنات من GitHub باستخدام BOT_SECRET_KEY
-            try {
-                await loadTokens();
-            } catch (tokenErr) {
-                console.error("❌ فشل جلب التوكنات:", tokenErr.message);
-                console.log("⏳ انتظار 30 ثانية قبل إعادة المحاولة...\n");
-                await sleep(30000);
-                continue;
-            }
-
             await runForever();
         } catch (e) {
             console.error(`❌ انهيار #${attempt}:`, e.message);
