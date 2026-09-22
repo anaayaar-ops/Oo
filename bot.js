@@ -2,13 +2,14 @@ const puppeteer = require('puppeteer');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const { loadTokens } = require('./token-loader.js');
 
 // ═══════════════════════════════════════════════════════════════
-// بيانات الحسابات
+// بيانات الحسابات (يتم تعبئتها من GitHub في الأسفل)
 // ═══════════════════════════════════════════════════════════════
-const TOKEN_HOST = "WE-dab4a6ab-9a11-4f0c-97c6-9f63b74f2831";
+let TOKEN_HOST = '';
+let TOKEN_GUEST = '';
 const USER_ID_HOST = 80055399;
-const TOKEN_GUEST = "WE-a4867dbc-6330-4cfc-9fbb-fdae78bc4466";
 const USER_ID_GUEST = 51660277;
 const GROUP_ID = 18432094;
 
@@ -125,8 +126,7 @@ async function deleteSession(token, st) {
 // ═══════════════════════════════════════════════════════════════
 async function leaveFromBothAccounts(lobbyId) {
     console.log(`🚪 مغادرة ${lobbyId} من الحسابين...`);
-    
-    // المنشئ - DELETE /user
+
     try {
         const r1 = await fetch(`https://experience.palringo.com/lobby/id/${lobbyId}/user`, {
             method: "DELETE",
@@ -135,7 +135,6 @@ async function leaveFromBothAccounts(lobbyId) {
         console.log(`   [المنشئ] leave → ${r1.status}`);
     } catch (e) {}
 
-    // الضيف - DELETE /user
     try {
         const r2 = await fetch(`https://experience.palringo.com/lobby/id/${lobbyId}/user`, {
             method: "DELETE",
@@ -144,7 +143,6 @@ async function leaveFromBothAccounts(lobbyId) {
         console.log(`   [الضيف] leave → ${r2.status}`);
     } catch (e) {}
 
-    // محاولة close أيضاً
     try {
         const r3 = await fetch(`https://experience.palringo.com/lobby/id/${lobbyId}/close`, {
             method: "POST",
@@ -208,21 +206,19 @@ async function rematchLobby(token, lobbyId) {
         const res = await fetch(`https://experience.palringo.com/lobby/id/${lobbyId}/rematch`, {
             method: "POST", headers, body
         });
-        
+
         if (!res.ok) {
             const text = await res.text();
             let err = {};
             try { err = JSON.parse(text); } catch (e) {}
-            
+
             console.log(`⚠️ Rematch فشل: ${res.status} code=${err.code} ${(err.message || '').slice(0, 100)}`);
-            
-            // code 55 = اللوبي في حالة 'open' → استخدمه مباشرة
+
             if (err.code === 55) {
                 console.log(`💡 اللوبي ${lobbyId} مفتوح → نستخدمه مباشرة`);
                 return lobbyId;
             }
-            
-            // code 5 = المستخدم عالق في لوبي آخر
+
             if (err.code === 5) {
                 const m = (err.message || '').match(/Lobby, id (\d+)/);
                 if (m && m[1] === String(lobbyId)) {
@@ -230,10 +226,10 @@ async function rematchLobby(token, lobbyId) {
                     return lobbyId;
                 }
             }
-            
+
             return null;
         }
-        
+
         const data = await res.json();
         console.log(`🔄 Rematch → ${data.id}`);
         return data.id;
@@ -263,10 +259,9 @@ async function joinLobby(token, lobbyId, accountName = "guest") {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// إنشاء لوبي ذكي — Rematch مرة واحدة، ثم مغادرة + إنشاء جديد
+// إنشاء لوبي ذكي
 // ═══════════════════════════════════════════════════════════════
 async function createLobbySmart(token, oldLobbyId = null) {
-    // ═══ 1) محاولة Rematch مرة واحدة فقط ═══
     if (oldLobbyId) {
         console.log(`🔄 Rematch (مرة واحدة) على ${oldLobbyId}...`);
         const newId = await rematchLobby(token, oldLobbyId);
@@ -274,12 +269,10 @@ async function createLobbySmart(token, oldLobbyId = null) {
             return { id: newId, usedRematch: true };
         }
 
-        // ❌ فشل → مغادرة فورية من الحسابين
         console.log(`⚠️ Rematch فشل → مغادرة فورية من الحسابين`);
         await leaveFromBothAccounts(oldLobbyId);
     }
 
-    // ═══ 2) إنشاء لوبي جديد (3 محاولات فقط) ═══
     for (let i = 1; i <= MAX_LOBBY_ATTEMPTS; i++) {
         console.log(`📄 محاولة إنشاء لوبي ${i}/${MAX_LOBBY_ATTEMPTS}...`);
         const result = await createLobbyRaw(token);
@@ -330,7 +323,7 @@ async function navigateToMainPage(page, token) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// WS Monitor — يراقب edgegap فقط
+// WS Monitor
 // ═══════════════════════════════════════════════════════════════
 async function installWebSocketMonitor(page) {
     await page.evaluateOnNewDocument(() => {
@@ -349,10 +342,10 @@ async function installWebSocketMonitor(page) {
         window.WebSocket = function(url, protocols) {
             const M = window.__gameMonitor;
             const isGameWs = /edgegap\.net/i.test(url);
-            
+
             M.allWsUrls.push({ url, isGameWs, t: Date.now() });
             console.log(`🔌 ${isGameWs ? '🎮 GAME' : '⚙️ LOBBY'}: ${url.slice(0, 60)}...`);
-            
+
             const ws = new OrigWS(url, protocols);
 
             ws.addEventListener('open', () => {
@@ -480,18 +473,18 @@ async function waitForGameStart(page1, page2, maxWait) {
     console.log(`⏳ انتظار بدء اللعبة (edgegap WS)...`);
     const start = Date.now();
     let lastLog = 0;
-    
+
     while (Date.now() - start < maxWait) {
         const m1 = await getMonitor(page1);
         const m2 = await getMonitor(page2);
         const m = m1?.connectCount > 0 ? m1 : (m2?.connectCount > 0 ? m2 : null);
-        
+
         if (m && m.connected && m.connectCount >= 1) {
             const elapsed = ((Date.now() - start) / 1000).toFixed(1);
             console.log(`✅ بدأت اللعبة بعد ${elapsed}s`);
             return true;
         }
-        
+
         const elapsed = Math.floor((Date.now() - start) / 1000);
         if (elapsed >= lastLog + 5) {
             lastLog = elapsed;
@@ -647,203 +640,3 @@ class RunContext {
         }
         if (!this.sessionGuest) throw new Error("فشل جلسة الضيف");
     }
-
-    async recreatePages() {
-        if (this.page1) try { await this.page1.close(); } catch (e) {}
-        if (this.page2) try { await this.page2.close(); } catch (e) {}
-
-        console.log("📄 تجهيز الصفحات...");
-        this.page1 = await this.browser1.newPage();
-        this.page2 = await this.browser2.newPage();
-        await this.page1.setViewport({ width: 600, height: 600 });
-        await this.page2.setViewport({ width: 600, height: 600 });
-        await this.page1.setUserAgent('Mozilla/5.0 (Linux; Android 13; NTH-NX9 Build/HONORNTH-N29; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/150.0.7871.124 Mobile Safari/537.36');
-        await this.page2.setUserAgent('Mozilla/5.0 (Linux; Android 13; NTH-NX9 Build/HONORNTH-N29; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/150.0.7871.124 Mobile Safari/537.36');
-        await installWebSocketMonitor(this.page1);
-        await installWebSocketMonitor(this.page2);
-    }
-
-    async cleanup() {
-        if (this.sessionHost) try { await deleteSession(TOKEN_HOST, this.sessionHost); } catch (e) {}
-        if (this.sessionGuest) try { await deleteSession(TOKEN_GUEST, this.sessionGuest); } catch (e) {}
-        if (this.tempDir1) deleteTempDir(this.tempDir1);
-        if (this.tempDir2) deleteTempDir(this.tempDir2);
-        try { if (this.browser1) await this.browser1.close(); } catch (e) {}
-        try { if (this.browser2) await this.browser2.close(); } catch (e) {}
-    }
-
-    async fullRestart() {
-        console.log("\n🔁 إعادة تشغيل كاملة...");
-        const oldB1 = this.browser1, oldB2 = this.browser2;
-        const oldT1 = this.tempDir1, oldT2 = this.tempDir2;
-        
-        this.browser1 = null; this.browser2 = null;
-        this.tempDir1 = null; this.tempDir2 = null;
-        this.page1 = null; this.page2 = null;
-        this.sessionHost = null; this.sessionGuest = null;
-        
-        try { if (oldB1) await oldB1.close(); } catch (e) {}
-        try { if (oldB2) await oldB2.close(); } catch (e) {}
-        if (oldT1) deleteTempDir(oldT1);
-        if (oldT2) deleteTempDir(oldT2);
-        
-        await this.init();
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════
-// الدورة الرئيسية
-// ═══════════════════════════════════════════════════════════════
-async function runForever() {
-    const ctx = new RunContext();
-    await ctx.init();
-
-    let stopping = false;
-    process.on('SIGINT', async () => {
-        if (stopping) return;
-        stopping = true;
-        console.log("\n🛑 إيقاف — تنظيف...");
-        await ctx.cleanup();
-        process.exit(0);
-    });
-    process.on('SIGTERM', async () => {
-        if (stopping) return;
-        stopping = true;
-        await ctx.cleanup();
-        process.exit(0);
-    });
-
-    console.log("\n========== فتح الصفحات الرئيسية ==========");
-    await Promise.all([
-        navigateToMainPage(ctx.page1, TOKEN_HOST),
-        navigateToMainPage(ctx.page2, TOKEN_GUEST)
-    ]);
-    await sleep(2000);
-
-    let lobbyId = null;
-    let round = 0;
-    let wins = 0;
-    let consecutiveFailures = 0;
-
-    while (true) {
-        try {
-            if (!lobbyId) {
-                const setup = await createLobbySmart(TOKEN_HOST, null);
-                if (!setup) {
-                    consecutiveFailures++;
-                    console.log(`⚠️ فشل إنشاء لوبي (${consecutiveFailures} متتالي)`);
-
-                    if (consecutiveFailures >= 5) {
-                        console.log("🔁 إعادة تشغيل كاملة...");
-                        await ctx.fullRestart();
-                        await Promise.all([
-                            navigateToMainPage(ctx.page1, TOKEN_HOST),
-                            navigateToMainPage(ctx.page2, TOKEN_GUEST)
-                        ]);
-                        await sleep(2000);
-                        consecutiveFailures = 0;
-                    } else {
-                        await sleep(5000);
-                    }
-                    continue;
-                }
-                lobbyId = setup.id;
-                consecutiveFailures = 0;
-            }
-
-            round++;
-            console.log(`\n══════════ الجولة ${round} (${wins} فوز) - لوبي ${lobbyId} ══════════`);
-
-            const result = await playOneRound(ctx.page1, ctx.page2, lobbyId);
-
-            if (!result.started) {
-                console.log(`⚠️ فشل البدء (${result.reason})`);
-                consecutiveFailures++;
-                
-                const setup = await createLobbySmart(TOKEN_HOST, null);
-                if (setup) {
-                    lobbyId = setup.id;
-                    consecutiveFailures = 0;
-                } else {
-                    lobbyId = null;
-                    if (consecutiveFailures >= 5) {
-                        await ctx.fullRestart();
-                        await Promise.all([
-                            navigateToMainPage(ctx.page1, TOKEN_HOST),
-                            navigateToMainPage(ctx.page2, TOKEN_GUEST)
-                        ]);
-                        await sleep(2000);
-                        consecutiveFailures = 0;
-                    }
-                }
-                continue;
-            }
-
-            consecutiveFailures = 0;
-            if (result.ended) wins++;
-
-            await sleep(MIN_WAIT_AFTER_DISCONNECT);
-            console.log(`\n🔄 تجهيز الجولة ${round + 1}...`);
-
-            const setup = await createLobbySmart(TOKEN_HOST, lobbyId);
-            if (!setup) {
-                const fresh = await createLobbySmart(TOKEN_HOST, null);
-                if (fresh) {
-                    lobbyId = fresh.id;
-                    console.log(`♻️ لوبي جديد جاهز`);
-                } else {
-                    lobbyId = null;
-                    console.log("⚠️ محاولة جديدة بعد 5s");
-                    await sleep(5000);
-                }
-            } else {
-                lobbyId = setup.id;
-                console.log(`♻️ جاهز (${setup.usedRematch ? 'Rematch ✅' : 'لوبي جديد'})`);
-            }
-
-        } catch (err) {
-            console.error(`\n❌ خطأ في الجولة ${round}:`, err.message);
-            consecutiveFailures++;
-
-            if (consecutiveFailures >= 3) {
-                console.log(`🔁 ${consecutiveFailures} إخفاقات → إعادة تشغيل كاملة...`);
-                try {
-                    await ctx.fullRestart();
-                    await Promise.all([
-                        navigateToMainPage(ctx.page1, TOKEN_HOST),
-                        navigateToMainPage(ctx.page2, TOKEN_GUEST)
-                    ]);
-                    await sleep(2000);
-                } catch (e) {
-                    console.error("❌ فشل إعادة التشغيل:", e.message);
-                    await sleep(15000);
-                }
-                consecutiveFailures = 0;
-                lobbyId = null;
-            } else {
-                await sleep(8000);
-            }
-        }
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════
-// نقطة البداية
-// ═══════════════════════════════════════════════════════════════
-(async () => {
-    let attempt = 0;
-    while (true) {
-        attempt++;
-        try {
-            console.log(`\n${'═'.repeat(60)}`);
-            console.log(`🚀 بدء التشغيل (محاولة #${attempt})`);
-            console.log(`${'═'.repeat(60)}\n`);
-            await runForever();
-        } catch (e) {
-            console.error(`❌ انهيار #${attempt}:`, e.message);
-            console.error(e.stack);
-            console.log(`⏳ إعادة المحاولة بعد 15s...\n`);
-            await sleep(15000);
-        }
-    }
-})();
