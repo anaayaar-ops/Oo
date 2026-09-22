@@ -25,7 +25,6 @@ const WAIT_AFTER_JOIN = 1000;
 const WAIT_AFTER_CLOSE = 2500;
 const WAIT_AFTER_INJECT = 1000;
 const WAIT_AFTER_LEAVE = 2000;
-const WAIT_FOR_MEMBERS = 8000;
 
 // ═══════════════════════════════════════════════════════════════
 // إعدادات اللعبة
@@ -127,6 +126,7 @@ async function deleteSession(token, st) {
 async function leaveFromBothAccounts(lobbyId) {
     console.log(`🚪 مغادرة ${lobbyId} من الحسابين...`);
     
+    // المنشئ - DELETE /user
     try {
         const r1 = await fetch(`https://experience.palringo.com/lobby/id/${lobbyId}/user`, {
             method: "DELETE",
@@ -135,6 +135,7 @@ async function leaveFromBothAccounts(lobbyId) {
         console.log(`   [المنشئ] leave → ${r1.status}`);
     } catch (e) {}
 
+    // الضيف - DELETE /user
     try {
         const r2 = await fetch(`https://experience.palringo.com/lobby/id/${lobbyId}/user`, {
             method: "DELETE",
@@ -143,6 +144,7 @@ async function leaveFromBothAccounts(lobbyId) {
         console.log(`   [الضيف] leave → ${r2.status}`);
     } catch (e) {}
 
+    // محاولة close أيضاً
     try {
         const r3 = await fetch(`https://experience.palringo.com/lobby/id/${lobbyId}/close`, {
             method: "POST",
@@ -214,11 +216,13 @@ async function rematchLobby(token, lobbyId) {
             
             console.log(`⚠️ Rematch فشل: ${res.status} code=${err.code} ${(err.message || '').slice(0, 100)}`);
             
+            // code 55 = اللوبي في حالة 'open' → استخدمه مباشرة
             if (err.code === 55) {
                 console.log(`💡 اللوبي ${lobbyId} مفتوح → نستخدمه مباشرة`);
                 return lobbyId;
             }
             
+            // code 5 = المستخدم عالق في لوبي آخر
             if (err.code === 5) {
                 const m = (err.message || '').match(/Lobby, id (\d+)/);
                 if (m && m[1] === String(lobbyId)) {
@@ -259,84 +263,10 @@ async function joinLobby(token, lobbyId, accountName = "guest") {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// API: قراءة عضويات اللوبي + التحقق
-// ═══════════════════════════════════════════════════════════════
-function extractUserIds(data) {
-    const ids = new Set();
-    const push = (arr) => {
-        if (!Array.isArray(arr)) return;
-        for (const u of arr) {
-            const id = u?.userId ?? u?.id ?? u?.user_id ?? u?.uid;
-            if (id != null) ids.add(Number(id));
-        }
-    };
-    push(data?.users);
-    push(data?.lobbyUsers);
-    push(data?.members);
-    push(data?.players);
-    push(data?.lobby?.users);
-    push(data?.lobby?.members);
-    push(data?.data?.users);
-    push(data?.data?.members);
-    if (data?.owner?.userId != null) ids.add(Number(data.owner.userId));
-    if (data?.ownerUserId != null) ids.add(Number(data.ownerUserId));
-    if (data?.userId != null) ids.add(Number(data.userId));
-    return [...ids];
-}
-
-async function getLobbyMembers(token, lobbyId) {
-    try {
-        const res = await fetch(`https://experience.palringo.com/lobby/id/${lobbyId}`, {
-            method: "GET",
-            headers: { ...baseHeaders, "authorization": `Bearer ${token}` }
-        });
-        if (!res.ok) return null;
-        const data = await res.json();
-        return extractUserIds(data);
-    } catch (e) {
-        return null;
-    }
-}
-
-// التحقق من أن العضويات هي بالتحديد الحسابين المطلوبين (بدون غريب)
-async function verifyLobbyMembers(token, lobbyId, maxWait = WAIT_FOR_MEMBERS) {
-    const start = Date.now();
-    let lastMembers = null;
-
-    while (Date.now() - start < maxWait) {
-        const members = await getLobbyMembers(token, lobbyId);
-        if (members && members.length > 0) {
-            lastMembers = members;
-            const hasHost  = members.includes(USER_ID_HOST);
-            const hasGuest = members.includes(USER_ID_GUEST);
-            // الغريب = أي عضو ليس من الحسابين
-            const strangers = members.filter(
-                id => id !== USER_ID_HOST && id !== USER_ID_GUEST
-            );
-
-            if (hasHost && hasGuest && strangers.length === 0) {
-                console.log(`✅ العضويات صحيحة: [${members.join(', ')}]`);
-                return { ok: true, members };
-            }
-
-            if (strangers.length > 0) {
-                console.log(`⚠️ عضو غريب في اللوبي: [${strangers.join(', ')}] → إلغاء`);
-                return { ok: false, members, reason: 'stranger' };
-            }
-
-            console.log(`⏳ انتظار العضويات... حالياً: [${members.join(', ')}]`);
-        }
-        await sleep(POLL_INTERVAL);
-    }
-
-    console.log(`❌ لم تكتمل العضويات خلال ${maxWait/1000}s → [${(lastMembers||[]).join(', ')}]`);
-    return { ok: false, members: lastMembers, reason: 'timeout' };
-}
-
-// ═══════════════════════════════════════════════════════════════
 // إنشاء لوبي ذكي — Rematch مرة واحدة، ثم مغادرة + إنشاء جديد
 // ═══════════════════════════════════════════════════════════════
 async function createLobbySmart(token, oldLobbyId = null) {
+    // ═══ 1) محاولة Rematch مرة واحدة فقط ═══
     if (oldLobbyId) {
         console.log(`🔄 Rematch (مرة واحدة) على ${oldLobbyId}...`);
         const newId = await rematchLobby(token, oldLobbyId);
@@ -344,10 +274,12 @@ async function createLobbySmart(token, oldLobbyId = null) {
             return { id: newId, usedRematch: true };
         }
 
+        // ❌ فشل → مغادرة فورية من الحسابين
         console.log(`⚠️ Rematch فشل → مغادرة فورية من الحسابين`);
         await leaveFromBothAccounts(oldLobbyId);
     }
 
+    // ═══ 2) إنشاء لوبي جديد (3 محاولات فقط) ═══
     for (let i = 1; i <= MAX_LOBBY_ATTEMPTS; i++) {
         console.log(`📄 محاولة إنشاء لوبي ${i}/${MAX_LOBBY_ATTEMPTS}...`);
         const result = await createLobbyRaw(token);
@@ -635,33 +567,6 @@ async function playOneRound(page1, page2, lobbyId) {
     await joinLobby(TOKEN_GUEST, lobbyId, "الضيف");
     await sleep(WAIT_AFTER_JOIN);
 
-    // ═══ 🔍 التحقق من العضويات قبل بدء اللعبة ═══
-    console.log(`🔍 التحقق من العضويات (من جهة المنشئ)...`);
-    const verifyHost = await verifyLobbyMembers(TOKEN_HOST, lobbyId);
-
-    if (!verifyHost.ok) {
-        console.log(`🚫 إلغاء البدء (${verifyHost.reason}) → مغادرة اللوبي من الحسابين`);
-        await leaveFromBothAccounts(lobbyId);
-        return { started: false, reason: `members_${verifyHost.reason}` };
-    }
-
-    // تأكيد إضافي من جهة الضيف
-    console.log(`🔍 تأكيد إضافي (من جهة الضيف)...`);
-    const membersGuest = await getLobbyMembers(TOKEN_GUEST, lobbyId);
-    const guestHasHost  = membersGuest && membersGuest.includes(USER_ID_HOST);
-    const guestHasGuest = membersGuest && membersGuest.includes(USER_ID_GUEST);
-    const guestStrangers = membersGuest
-        ? membersGuest.filter(id => id !== USER_ID_HOST && id !== USER_ID_GUEST)
-        : [];
-
-    if (!guestHasHost || !guestHasGuest || guestStrangers.length > 0) {
-        console.log(`🚫 تحقق الضيف فشل: [${(membersGuest||[]).join(', ')}] → إلغاء`);
-        await leaveFromBothAccounts(lobbyId);
-        return { started: false, reason: 'members_guest_check_failed' };
-    }
-
-    console.log(`✅ العضويات مؤكدة من الجهتين`);
-
     console.log(`🎮 close (بدء اللعبة)...`);
     const closed = await closeLobby(TOKEN_HOST, lobbyId);
     if (!closed) return { started: false, reason: 'close_failed' };
@@ -854,11 +759,8 @@ async function runForever() {
             if (!result.started) {
                 console.log(`⚠️ فشل البدء (${result.reason})`);
                 consecutiveFailures++;
-
-                // لو السبب عضويات (غريب/غير مكتمل) → لا Rematch، ننشئ لوبي جديد
-                const membersIssue = String(result.reason).includes('members');
-                const setup = await createLobbySmart(TOKEN_HOST, membersIssue ? null : null);
-
+                
+                const setup = await createLobbySmart(TOKEN_HOST, null);
                 if (setup) {
                     lobbyId = setup.id;
                     consecutiveFailures = 0;
