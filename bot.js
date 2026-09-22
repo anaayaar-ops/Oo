@@ -640,3 +640,219 @@ class RunContext {
         }
         if (!this.sessionGuest) throw new Error("فشل جلسة الضيف");
     }
+
+    async recreatePages() {
+        if (this.page1) try { await this.page1.close(); } catch (e) {}
+        if (this.page2) try { await this.page2.close(); } catch (e) {}
+
+        console.log("📄 تجهيز الصفحات...");
+        this.page1 = await this.browser1.newPage();
+        this.page2 = await this.browser2.newPage();
+        await this.page1.setViewport({ width: 600, height: 600 });
+        await this.page2.setViewport({ width: 600, height: 600 });
+        await this.page1.setUserAgent('Mozilla/5.0 (Linux; Android 13; NTH-NX9 Build/HONORNTH-N29; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/150.0.7871.124 Mobile Safari/537.36');
+        await this.page2.setUserAgent('Mozilla/5.0 (Linux; Android 13; NTH-NX9 Build/HONORNTH-N29; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/150.0.7871.124 Mobile Safari/537.36');
+        await installWebSocketMonitor(this.page1);
+        await installWebSocketMonitor(this.page2);
+    }
+
+    async cleanup() {
+        if (this.sessionHost) try { await deleteSession(TOKEN_HOST, this.sessionHost); } catch (e) {}
+        if (this.sessionGuest) try { await deleteSession(TOKEN_GUEST, this.sessionGuest); } catch (e) {}
+        if (this.tempDir1) deleteTempDir(this.tempDir1);
+        if (this.tempDir2) deleteTempDir(this.tempDir2);
+        try { if (this.browser1) await this.browser1.close(); } catch (e) {}
+        try { if (this.browser2) await this.browser2.close(); } catch (e) {}
+    }
+
+    async fullRestart() {
+        console.log("\n🔁 إعادة تشغيل كاملة...");
+        const oldB1 = this.browser1, oldB2 = this.browser2;
+        const oldT1 = this.tempDir1, oldT2 = this.tempDir2;
+
+        this.browser1 = null; this.browser2 = null;
+        this.tempDir1 = null; this.tempDir2 = null;
+        this.page1 = null; this.page2 = null;
+        this.sessionHost = null; this.sessionGuest = null;
+
+        try { if (oldB1) await oldB1.close(); } catch (e) {}
+        try { if (oldB2) await oldB2.close(); } catch (e) {}
+        if (oldT1) deleteTempDir(oldT1);
+        if (oldT2) deleteTempDir(oldT2);
+
+        await this.init();
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// الدورة الرئيسية
+// ═══════════════════════════════════════════════════════════════
+async function runForever() {
+    const ctx = new RunContext();
+    await ctx.init();
+
+    let stopping = false;
+    process.on('SIGINT', async () => {
+        if (stopping) return;
+        stopping = true;
+        console.log("\n🛑 إيقاف — تنظيف...");
+        await ctx.cleanup();
+        process.exit(0);
+    });
+    process.on('SIGTERM', async () => {
+        if (stopping) return;
+        stopping = true;
+        await ctx.cleanup();
+        process.exit(0);
+    });
+
+    console.log("\n========== فتح الصفحات الرئيسية ==========");
+    await Promise.all([
+        navigateToMainPage(ctx.page1, TOKEN_HOST),
+        navigateToMainPage(ctx.page2, TOKEN_GUEST)
+    ]);
+    await sleep(2000);
+
+    let lobbyId = null;
+    let round = 0;
+    let wins = 0;
+    let consecutiveFailures = 0;
+
+    while (true) {
+        try {
+            if (!lobbyId) {
+                const setup = await createLobbySmart(TOKEN_HOST, null);
+                if (!setup) {
+                    consecutiveFailures++;
+                    console.log(`⚠️ فشل إنشاء لوبي (${consecutiveFailures} متتالي)`);
+
+                    if (consecutiveFailures >= 5) {
+                        console.log("🔁 إعادة تشغيل كاملة...");
+                        await ctx.fullRestart();
+                        await Promise.all([
+                            navigateToMainPage(ctx.page1, TOKEN_HOST),
+                            navigateToMainPage(ctx.page2, TOKEN_GUEST)
+                        ]);
+                        await sleep(2000);
+                        consecutiveFailures = 0;
+                    } else {
+                        await sleep(5000);
+                    }
+                    continue;
+                }
+                lobbyId = setup.id;
+                consecutiveFailures = 0;
+            }
+
+            round++;
+            console.log(`\n══════════ الجولة ${round} (${wins} فوز) - لوبي ${lobbyId} ══════════`);
+
+            const result = await playOneRound(ctx.page1, ctx.page2, lobbyId);
+
+            if (!result.started) {
+                console.log(`⚠️ فشل البدء (${result.reason})`);
+                consecutiveFailures++;
+
+                const setup = await createLobbySmart(TOKEN_HOST, null);
+                if (setup) {
+                    lobbyId = setup.id;
+                    consecutiveFailures = 0;
+                } else {
+                    lobbyId = null;
+                    if (consecutiveFailures >= 5) {
+                        await ctx.fullRestart();
+                        await Promise.all([
+                            navigateToMainPage(ctx.page1, TOKEN_HOST),
+                            navigateToMainPage(ctx.page2, TOKEN_GUEST)
+                        ]);
+                        await sleep(2000);
+                        consecutiveFailures = 0;
+                    }
+                }
+                continue;
+            }
+
+            consecutiveFailures = 0;
+            if (result.ended) wins++;
+
+            await sleep(MIN_WAIT_AFTER_DISCONNECT);
+            console.log(`\n🔄 تجهيز الجولة ${round + 1}...`);
+
+            const setup = await createLobbySmart(TOKEN_HOST, lobbyId);
+            if (!setup) {
+                const fresh = await createLobbySmart(TOKEN_HOST, null);
+                if (fresh) {
+                    lobbyId = fresh.id;
+                    console.log(`♻️ لوبي جديد جاهز`);
+                } else {
+                    lobbyId = null;
+                    console.log("⚠️ محاولة جديدة بعد 5s");
+                    await sleep(5000);
+                }
+            } else {
+                lobbyId = setup.id;
+                console.log(`♻️ جاهز (${setup.usedRematch ? 'Rematch ✅' : 'لوبي جديد'})`);
+            }
+
+        } catch (err) {
+            console.error(`\n❌ خطأ في الجولة ${round}:`, err.message);
+            consecutiveFailures++;
+
+            if (consecutiveFailures >= 3) {
+                console.log(`🔁 ${consecutiveFailures} إخفاقات → إعادة تشغيل كاملة...`);
+                try {
+                    await ctx.fullRestart();
+                    await Promise.all([
+                        navigateToMainPage(ctx.page1, TOKEN_HOST),
+                        navigateToMainPage(ctx.page2, TOKEN_GUEST)
+                    ]);
+                    await sleep(2000);
+                } catch (e) {
+                    console.error("❌ فشل إعادة التشغيل:", e.message);
+                    await sleep(15000);
+                }
+                consecutiveFailures = 0;
+                lobbyId = null;
+            } else {
+                await sleep(8000);
+            }
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// نقطة البداية
+// ═══════════════════════════════════════════════════════════════
+(async () => {
+    console.log('📥 تحميل التوكنات من GitHub...');
+    try {
+        const tokens = await loadTokens();
+        TOKEN_HOST = tokens.TOKEN_HOST;
+        TOKEN_GUEST = tokens.TOKEN_GUEST;
+    } catch (e) {
+        console.error('❌ فشل تحميل التوكنات:', e.message);
+        process.exit(1);
+    }
+
+    if (!TOKEN_HOST) throw new Error('❌ TOKEN_HOST مفقود');
+    if (!TOKEN_GUEST) throw new Error('❌ TOKEN_GUEST مفقود');
+
+    console.log(`✅ TOKEN_HOST  (${USER_ID_HOST})  → ${TOKEN_HOST.slice(0, 10)}...`);
+    console.log(`✅ TOKEN_GUEST (${USER_ID_GUEST}) → ${TOKEN_GUEST.slice(0, 10)}...\n`);
+
+    let attempt = 0;
+    while (true) {
+        attempt++;
+        try {
+            console.log(`\n${'═'.repeat(60)}`);
+            console.log(`🚀 بدء التشغيل (محاولة #${attempt})`);
+            console.log(`${'═'.repeat(60)}\n`);
+            await runForever();
+        } catch (e) {
+            console.error(`❌ انهيار #${attempt}:`, e.message);
+            console.error(e.stack);
+            console.log(`⏳ إعادة المحاولة بعد 15s...\n`);
+            await sleep(15000);
+        }
+    }
+})();
