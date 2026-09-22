@@ -12,20 +12,21 @@ let TOKEN_GUEST = '';
 const USER_ID_HOST = 80055399;
 const USER_ID_GUEST = 51660277;
 const GROUP_ID = 18432094;
+const EXPECTED_USER_IDS = [USER_ID_HOST, USER_ID_GUEST];
 
 // ═══════════════════════════════════════════════════════════════
-// الإعدادات
+// الإعدادات (مُحسّنة للسرعة)
 // ═══════════════════════════════════════════════════════════════
-const MIN_WAIT_AFTER_DISCONNECT = 1500;
-const MAX_WAIT_START = 40000;
+const MIN_WAIT_AFTER_DISCONNECT = 800;
+const MAX_WAIT_START = 30000;
 const MAX_PLAY_TIME = 5 * 60 * 1000;
-const POLL_INTERVAL = 200;
+const POLL_INTERVAL = 150;
 const MAX_LOBBY_ATTEMPTS = 3;
-const WAIT_AFTER_NAVIGATE = 3000;
-const WAIT_AFTER_JOIN = 1000;
-const WAIT_AFTER_CLOSE = 2500;
-const WAIT_AFTER_INJECT = 1000;
-const WAIT_AFTER_LEAVE = 2000;
+const WAIT_AFTER_NAVIGATE = 2000;
+const WAIT_AFTER_JOIN = 300;
+const WAIT_AFTER_CLOSE = 2000;
+const WAIT_AFTER_INJECT = 800;
+const WAIT_AFTER_LEAVE = 1200;
 
 // ═══════════════════════════════════════════════════════════════
 // إعدادات اللعبة
@@ -127,21 +128,26 @@ async function deleteSession(token, st) {
 async function leaveFromBothAccounts(lobbyId) {
     console.log(`🚪 مغادرة ${lobbyId} من الحسابين...`);
 
-    try {
-        const r1 = await fetch(`https://experience.palringo.com/lobby/id/${lobbyId}/user`, {
-            method: "DELETE",
-            headers: { ...baseHeaders, "authorization": `Bearer ${TOKEN_HOST}` }
-        });
-        console.log(`   [المنشئ] leave → ${r1.status}`);
-    } catch (e) {}
+    const tryDelete = async (token, label) => {
+        try {
+            const r = await fetch(`https://experience.palringo.com/lobby/id/${lobbyId}/user`, {
+                method: "DELETE",
+                headers: { ...baseHeaders, "authorization": `Bearer ${token}` }
+            });
+            console.log(`   [${label}] leave → ${r.status}`);
+            if (!r.ok && r.status !== 204) {
+                const t = await r.text();
+                console.log(`   ⚠️ [${label}] تفاصيل: ${t.slice(0, 120)}`);
+            }
+            return r.ok || r.status === 204;
+        } catch (e) {
+            console.error(`   ❌ [${label}] leave:`, e.message);
+            return false;
+        }
+    };
 
-    try {
-        const r2 = await fetch(`https://experience.palringo.com/lobby/id/${lobbyId}/user`, {
-            method: "DELETE",
-            headers: { ...baseHeaders, "authorization": `Bearer ${TOKEN_GUEST}` }
-        });
-        console.log(`   [الضيف] leave → ${r2.status}`);
-    } catch (e) {}
+    await tryDelete(TOKEN_HOST, "المنشئ");
+    await tryDelete(TOKEN_GUEST, "الضيف");
 
     try {
         const r3 = await fetch(`https://experience.palringo.com/lobby/id/${lobbyId}/close`, {
@@ -149,7 +155,9 @@ async function leaveFromBothAccounts(lobbyId) {
             headers: { ...baseHeaders, "authorization": `Bearer ${TOKEN_HOST}`, "content-length": "0" }
         });
         console.log(`   [المنشئ] close → ${r3.status}`);
-    } catch (e) {}
+    } catch (e) {
+        console.error(`   ❌ close:`, e.message);
+    }
 
     await sleep(WAIT_AFTER_LEAVE);
 }
@@ -259,18 +267,102 @@ async function joinLobby(token, lobbyId, accountName = "guest") {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// إنشاء لوبي ذكي
+// API: جلب قائمة اللاعبين في اللوبي
+// ═══════════════════════════════════════════════════════════════
+async function getLobbyUsers(lobbyId, token = null) {
+    try {
+        const res = await fetch(`https://experience.palringo.com/lobby/id/${lobbyId}/users`, {
+            headers: { ...baseHeaders, "authorization": `Bearer ${token || TOKEN_HOST}` }
+        });
+        if (!res.ok) {
+            if (res.status === 404) return [];
+            return null;
+        }
+        const data = await res.json();
+        return Array.isArray(data) ? data : (data.users || []);
+    } catch (e) {
+        return null;
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// طرد لاعب غريب من اللوبي
+// ═══════════════════════════════════════════════════════════════
+async function kickUser(lobbyId, userId) {
+    try {
+        const res = await fetch(`https://experience.palringo.com/lobby/id/${lobbyId}/user/${userId}`, {
+            method: "DELETE",
+            headers: { ...baseHeaders, "authorization": `Bearer ${TOKEN_HOST}` }
+        });
+        console.log(`   🥾 kick ${userId} → ${res.status}`);
+        return res.ok || res.status === 204;
+    } catch (e) {
+        console.error(`   ❌ kick ${userId}:`, e.message);
+        return false;
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// فحص اللاعبين — يرجع { ok, strangers, users, ids, reason }
+// ═══════════════════════════════════════════════════════════════
+async function checkLobbyPlayers(lobbyId) {
+    const users = await getLobbyUsers(lobbyId);
+    if (users === null) {
+        return { ok: false, strangers: [], users: null, ids: [], reason: 'fetch_failed' };
+    }
+    const ids = users.map(u => u.userId || u.id || u.user_id).filter(Boolean);
+    const strangers = ids.filter(id => !EXPECTED_USER_IDS.includes(id));
+    return {
+        ok: strangers.length === 0,
+        strangers,
+        users,
+        ids,
+        reason: strangers.length > 0 ? 'strangers' : 'ok'
+    };
+}
+
+// ═══════════════════════════════════════════════════════════════
+// طرد كل الغرباء
+// ═══════════════════════════════════════════════════════════════
+async function kickAllStrangers(lobbyId, strangers) {
+    if (!strangers || strangers.length === 0) return true;
+    console.log(`   🥾 طرد ${strangers.length} غريب...`);
+    let allOk = true;
+    for (const uid of strangers) {
+        const ok = await kickUser(lobbyId, uid);
+        if (!ok) allOk = false;
+    }
+    return allOk;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// إنشاء لوبي ذكي (مع فحص اللاعبين)
 // ═══════════════════════════════════════════════════════════════
 async function createLobbySmart(token, oldLobbyId = null) {
     if (oldLobbyId) {
         console.log(`🔄 Rematch (مرة واحدة) على ${oldLobbyId}...`);
         const newId = await rematchLobby(token, oldLobbyId);
         if (newId) {
-            return { id: newId, usedRematch: true };
+            // فحص فوري للوبي rematch
+            const check = await checkLobbyPlayers(newId);
+            if (check.strangers.length > 0) {
+                console.log(`🚨 لوبي rematch فيه غرباء [${check.strangers.join(', ')}] → طردهم`);
+                await kickAllStrangers(newId, check.strangers);
+                await sleep(300);
+                const recheck = await checkLobbyPlayers(newId);
+                if (recheck.strangers.length > 0) {
+                    console.log(`🚨 فشل الطرد → إلغاء الـ rematch`);
+                    await leaveFromBothAccounts(newId);
+                } else {
+                    return { id: newId, usedRematch: true };
+                }
+            } else {
+                return { id: newId, usedRematch: true };
+            }
+        } else {
+            console.log(`⚠️ Rematch فشل → مغادرة فورية من الحسابين`);
+            await leaveFromBothAccounts(oldLobbyId);
         }
-
-        console.log(`⚠️ Rematch فشل → مغادرة فورية من الحسابين`);
-        await leaveFromBothAccounts(oldLobbyId);
     }
 
     for (let i = 1; i <= MAX_LOBBY_ATTEMPTS; i++) {
@@ -279,6 +371,14 @@ async function createLobbySmart(token, oldLobbyId = null) {
 
         if (result.ok) {
             console.log(`✅ لوبي جديد: ${result.id}`);
+
+            // فحص فوري
+            const check = await checkLobbyPlayers(result.id);
+            if (check.strangers.length > 0) {
+                console.log(`🚨 غريب في اللوبي الجديد → طرد`);
+                await kickAllStrangers(result.id, check.strangers);
+            }
+
             return { id: result.id, usedRematch: false };
         }
 
@@ -291,7 +391,7 @@ async function createLobbySmart(token, oldLobbyId = null) {
             await leaveFromBothAccounts(stuckId);
         } else {
             console.log(`⚠️ محاولة ${i}: ${result.status} ${errorMsg.slice(0, 80)}`);
-            await sleep(2000);
+            await sleep(1500);
         }
     }
 
@@ -546,9 +646,36 @@ async function waitForGameEnd(page1, page2, maxWait) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// لعب جولة واحدة
+// لعب جولة واحدة (مُحسّنة: انضمام فوري + فحص مزدوج)
 // ═══════════════════════════════════════════════════════════════
 async function playOneRound(page1, page2, lobbyId) {
+    // ═══ الخطوة 1: الضيف ينضم فوراً عبر API ═══
+    console.log(`🚪 [فوري] انضمام الضيف للوبي ${lobbyId}...`);
+    const joined = await joinLobby(TOKEN_GUEST, lobbyId, "الضيف");
+    if (!joined) {
+        console.log(`⚠️ فشل انضمام الضيف → إلغاء`);
+        return { started: false, reason: 'guest_join_failed' };
+    }
+
+    // ═══ الخطوة 2: فحص فوري ═══
+    let check = await checkLobbyPlayers(lobbyId);
+    console.log(`   👥 لاعبون: [${(check.ids || []).join(', ')}] | غرباء: ${check.strangers.length}`);
+
+    if (check.strangers.length > 0) {
+        const kicked = await kickAllStrangers(lobbyId, check.strangers);
+        await sleep(400);
+
+        check = await checkLobbyPlayers(lobbyId);
+        console.log(`   👥 بعد الطرد: [${(check.ids || []).join(', ')}]`);
+
+        if (check.strangers.length > 0) {
+            console.log(`🚨 غرباء مصرّون → إلغاء الجولة`);
+            await leaveFromBothAccounts(lobbyId);
+            return { started: false, reason: 'strangers_persist' };
+        }
+    }
+
+    // ═══ الخطوة 3: توجيه الصفحات (متوازٍ) ═══
     console.log(`🌐 توجيه الصفحات للوبي ${lobbyId}...`);
     await Promise.all([
         navigateToLobby(page1, TOKEN_HOST, lobbyId),
@@ -556,15 +683,27 @@ async function playOneRound(page1, page2, lobbyId) {
     ]);
     await sleep(WAIT_AFTER_NAVIGATE);
 
-    console.log(`🚪 انضمام الضيف...`);
-    await joinLobby(TOKEN_GUEST, lobbyId, "الضيف");
-    await sleep(WAIT_AFTER_JOIN);
+    // ═══ الخطوة 4: فحص ثانٍ قبل close ═══
+    check = await checkLobbyPlayers(lobbyId);
+    if (check.strangers.length > 0) {
+        console.log(`🚨 غريب تسلل أثناء التوجيه: [${check.strangers.join(', ')}]`);
+        await kickAllStrangers(lobbyId, check.strangers);
+        await sleep(300);
+        check = await checkLobbyPlayers(lobbyId);
+        if (check.strangers.length > 0) {
+            console.log(`🚨 لا يزال موجوداً → إلغاء`);
+            await leaveFromBothAccounts(lobbyId);
+            return { started: false, reason: 'stranger_at_close' };
+        }
+    }
 
+    // ═══ الخطوة 5: close ═══
     console.log(`🎮 close (بدء اللعبة)...`);
     const closed = await closeLobby(TOKEN_HOST, lobbyId);
     if (!closed) return { started: false, reason: 'close_failed' };
     await sleep(WAIT_AFTER_CLOSE);
 
+    // ═══ الخطوة 6: حقن البيانات ═══
     console.log(`💉 حقن البيانات...`);
     await Promise.all([
         injectData(page1, TOKEN_HOST, USER_ID_HOST, lobbyId),
