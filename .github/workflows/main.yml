@@ -1,8 +1,6 @@
 name: Continuous Bot Runner
 
 on:
-  schedule:
-    - cron: '0 21,1,5,9,13,17 * * *'   # بتوقيت مكة: 12ص, 4ص, 8ص, 12م, 4م, 8م
   workflow_dispatch:
 
 concurrency:
