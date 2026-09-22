@@ -5,7 +5,7 @@ on:
 
 concurrency:
   group: wolf-bot-running
-  cancel-in-progress: true
+  cancel-in-progress: false   # ⚠️ لا تقتل النسخة الحالية عند بدء جديدة
 
 jobs:
   run-bot:
@@ -36,14 +36,19 @@ jobs:
           npm install
           npx puppeteer browsers install chrome
 
+      - name: Verify GH_READ_TOKEN
+        env:
+          GH_READ_TOKEN: ${{ secrets.GH_READ_TOKEN }}
+        run: |
+          if [ -z "$GH_READ_TOKEN" ]; then
+            echo "❌ GH_READ_TOKEN غير موجود في Secrets"
+            exit 1
+          fi
+          echo "✅ GH_READ_TOKEN متوفر"
+
       - name: Execution Logic
         env:
-          GITHUB_PAT: ${{ secrets.GITHUB_PAT }}
-          TOKEN_1: ${{ secrets.TOKEN_1 }}
-          TOKEN_2: ${{ secrets.TOKEN_2 }}
-          USER_ID_1: ${{ secrets.USER_ID_1 }}
-          USER_ID_2: ${{ secrets.USER_ID_2 }}
-          GROUP_ID: ${{ secrets.GROUP_ID }}
+          GH_READ_TOKEN: ${{ secrets.GH_READ_TOKEN }}
         run: |
           echo "🚀 بدء التشغيل لمدة 6 ساعات (21600 ثانية)..."
 
@@ -66,7 +71,6 @@ jobs:
           # انتظار 6 ساعات مع فحص دوري
           END_TIME=$(( $(date +%s) + 21600 ))
           while [ "$(date +%s)" -lt "$END_TIME" ]; do
-            # تحقق أن البوت لا يزال يعمل
             if ! kill -0 $BOT_PID 2>/dev/null; then
               echo "⚠️ البوت توقف قبل الوقت المتوقع"
               break
