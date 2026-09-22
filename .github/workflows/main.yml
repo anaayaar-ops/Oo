@@ -5,7 +5,7 @@ on:
 
 concurrency:
   group: wolf-bot-running
-  cancel-in-progress: false   # ⚠️ لا تقتل النسخة الحالية عند بدء جديدة
+  cancel-in-progress: true   
 
 jobs:
   run-bot:
