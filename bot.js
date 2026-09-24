@@ -12,21 +12,21 @@ let TOKEN_GUEST = '';
 const USER_ID_HOST = 80055399;
 const USER_ID_GUEST = 51660277;
 const GROUP_ID = 18432094;
-const EXPECTED_USER_IDS = [USER_ID_HOST, USER_ID_GUEST];
 
 // ═══════════════════════════════════════════════════════════════
-// الإعدادات (مُحسّنة للسرعة)
+// الإعدادات
 // ═══════════════════════════════════════════════════════════════
-const MIN_WAIT_AFTER_DISCONNECT = 800;
-const MAX_WAIT_START = 30000;
+const MIN_WAIT_AFTER_DISCONNECT = 1500;
+const MAX_WAIT_START = 40000;
 const MAX_PLAY_TIME = 5 * 60 * 1000;
-const POLL_INTERVAL = 150;
+const POLL_INTERVAL = 200;
 const MAX_LOBBY_ATTEMPTS = 3;
-const WAIT_AFTER_NAVIGATE = 2000;
-const WAIT_AFTER_JOIN = 300;
-const WAIT_AFTER_CLOSE = 2000;
-const WAIT_AFTER_INJECT = 800;
-const WAIT_AFTER_LEAVE = 1200;
+const MAX_STUCK_ATTEMPTS = 3;   // عدد المحاولات على نفس اللوبي العالق قبل إعادة التشغيل الكامل
+const WAIT_AFTER_NAVIGATE = 3000;
+const WAIT_AFTER_JOIN = 1000;
+const WAIT_AFTER_CLOSE = 2500;
+const WAIT_AFTER_INJECT = 1000;
+const WAIT_AFTER_LEAVE = 2000;
 
 // ═══════════════════════════════════════════════════════════════
 // إعدادات اللعبة
@@ -78,6 +78,11 @@ function deleteTempDir(dir) {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// تتبع اللوبيات العالقة (لمنع الحلقات المفرغة)
+// ═══════════════════════════════════════════════════════════════
+const _stuckLobbyAttempts = new Map(); // { lobbyId: عدد المحاولات }
+
+// ═══════════════════════════════════════════════════════════════
 // API: الجلسات
 // ═══════════════════════════════════════════════════════════════
 async function createSession(token, name) {
@@ -123,43 +128,69 @@ async function deleteSession(token, st) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// API: مغادرة اللوبي من الحسابين
+// API: تفكيك اللوبي (حذف كامل للمالك + مغادرة الضيف)
 // ═══════════════════════════════════════════════════════════════
 async function leaveFromBothAccounts(lobbyId) {
-    console.log(`🚪 مغادرة ${lobbyId} من الحسابين...`);
+    console.log(`🚪 تفكيك اللوبي ${lobbyId}...`);
 
-    const tryDelete = async (token, label) => {
-        try {
-            const r = await fetch(`https://experience.palringo.com/lobby/id/${lobbyId}/user`, {
-                method: "DELETE",
-                headers: { ...baseHeaders, "authorization": `Bearer ${token}` }
-            });
-            console.log(`   [${label}] leave → ${r.status}`);
-            if (!r.ok && r.status !== 204) {
-                const t = await r.text();
-                console.log(`   ⚠️ [${label}] تفاصيل: ${t.slice(0, 120)}`);
-            }
-            return r.ok || r.status === 204;
-        } catch (e) {
-            console.error(`   ❌ [${label}] leave:`, e.message);
-            return false;
-        }
+    const hostHeaders = {
+        ...baseHeaders,
+        "authorization": `Bearer ${TOKEN_HOST}`,
+        "content-length": "0"
     };
 
-    await tryDelete(TOKEN_HOST, "المنشئ");
-    await tryDelete(TOKEN_GUEST, "الضيف");
-
+    // ═══ 1) الضيف: مغادرة عادية (قد تفشل بـ 403 إن لم يكن فيه — طبيعي) ═══
     try {
-        const r3 = await fetch(`https://experience.palringo.com/lobby/id/${lobbyId}/close`, {
-            method: "POST",
-            headers: { ...baseHeaders, "authorization": `Bearer ${TOKEN_HOST}`, "content-length": "0" }
+        const r = await fetch(`https://experience.palringo.com/lobby/id/${lobbyId}/user`, {
+            method: "DELETE",
+            headers: { ...baseHeaders, "authorization": `Bearer ${TOKEN_GUEST}` }
         });
-        console.log(`   [المنشئ] close → ${r3.status}`);
+        console.log(`   [الضيف] leave → ${r.status}`);
+    } catch (e) {}
+
+    // ═══ 2) المالك: DELETE اللوبي بالكامل (الحل الصحيح — leave يفشل للمالك) ═══
+    try {
+        const r = await fetch(`https://experience.palringo.com/lobby/id/${lobbyId}`, {
+            method: "DELETE",
+            headers: hostHeaders
+        });
+        console.log(`   [المنشئ] DELETE /lobby → ${r.status}`);
+
+        if (r.status === 200 || r.status === 204) {
+            console.log(`   ✅ تم حذف اللوبي ${lobbyId} من السيرفر`);
+            await sleep(WAIT_AFTER_LEAVE);
+            return true;
+        }
+
+        // اطبع تفاصيل الفشل إن وُجدت
+        if (r.status === 403 || r.status === 400) {
+            const text = await r.text().catch(() => '');
+            if (text) console.log(`   تفاصيل: ${text.slice(0, 150)}`);
+        }
     } catch (e) {
-        console.error(`   ❌ close:`, e.message);
+        console.log(`   ❌ DELETE /lobby: ${e.message}`);
     }
 
+    // ═══ 3) المالك: close (احتياطي) ═══
+    try {
+        const r = await fetch(`https://experience.palringo.com/lobby/id/${lobbyId}/close`, {
+            method: "POST",
+            headers: hostHeaders
+        });
+        console.log(`   [المنشئ] close → ${r.status}`);
+    } catch (e) {}
+
+    // ═══ 4) المالك: leave (احتياطي — قد يفشل بـ 403 للمالك، لكن نجرّب) ═══
+    try {
+        const r = await fetch(`https://experience.palringo.com/lobby/id/${lobbyId}/user`, {
+            method: "DELETE",
+            headers: { ...baseHeaders, "authorization": `Bearer ${TOKEN_HOST}` }
+        });
+        console.log(`   [المنشئ] leave → ${r.status}`);
+    } catch (e) {}
+
     await sleep(WAIT_AFTER_LEAVE);
+    return false;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -267,118 +298,29 @@ async function joinLobby(token, lobbyId, accountName = "guest") {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// API: جلب قائمة اللاعبين في اللوبي
-// ═══════════════════════════════════════════════════════════════
-async function getLobbyUsers(lobbyId, token = null) {
-    try {
-        const res = await fetch(`https://experience.palringo.com/lobby/id/${lobbyId}/users`, {
-            headers: { ...baseHeaders, "authorization": `Bearer ${token || TOKEN_HOST}` }
-        });
-        if (!res.ok) {
-            if (res.status === 404) return [];
-            return null;
-        }
-        const data = await res.json();
-        return Array.isArray(data) ? data : (data.users || []);
-    } catch (e) {
-        return null;
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════
-// طرد لاعب غريب من اللوبي
-// ═══════════════════════════════════════════════════════════════
-async function kickUser(lobbyId, userId) {
-    try {
-        const res = await fetch(`https://experience.palringo.com/lobby/id/${lobbyId}/user/${userId}`, {
-            method: "DELETE",
-            headers: { ...baseHeaders, "authorization": `Bearer ${TOKEN_HOST}` }
-        });
-        console.log(`   🥾 kick ${userId} → ${res.status}`);
-        return res.ok || res.status === 204;
-    } catch (e) {
-        console.error(`   ❌ kick ${userId}:`, e.message);
-        return false;
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════
-// فحص اللاعبين — يرجع { ok, strangers, users, ids, reason }
-// ═══════════════════════════════════════════════════════════════
-async function checkLobbyPlayers(lobbyId) {
-    const users = await getLobbyUsers(lobbyId);
-    if (users === null) {
-        return { ok: false, strangers: [], users: null, ids: [], reason: 'fetch_failed' };
-    }
-    const ids = users.map(u => u.userId || u.id || u.user_id).filter(Boolean);
-    const strangers = ids.filter(id => !EXPECTED_USER_IDS.includes(id));
-    return {
-        ok: strangers.length === 0,
-        strangers,
-        users,
-        ids,
-        reason: strangers.length > 0 ? 'strangers' : 'ok'
-    };
-}
-
-// ═══════════════════════════════════════════════════════════════
-// طرد كل الغرباء
-// ═══════════════════════════════════════════════════════════════
-async function kickAllStrangers(lobbyId, strangers) {
-    if (!strangers || strangers.length === 0) return true;
-    console.log(`   🥾 طرد ${strangers.length} غريب...`);
-    let allOk = true;
-    for (const uid of strangers) {
-        const ok = await kickUser(lobbyId, uid);
-        if (!ok) allOk = false;
-    }
-    return allOk;
-}
-
-// ═══════════════════════════════════════════════════════════════
-// إنشاء لوبي ذكي (مع فحص اللاعبين)
+// إنشاء لوبي ذكي — مع كشف الحلقة العالقة
 // ═══════════════════════════════════════════════════════════════
 async function createLobbySmart(token, oldLobbyId = null) {
+    // ═══ 1) محاولة Rematch مرة واحدة فقط ═══
     if (oldLobbyId) {
         console.log(`🔄 Rematch (مرة واحدة) على ${oldLobbyId}...`);
         const newId = await rematchLobby(token, oldLobbyId);
         if (newId) {
-            // فحص فوري للوبي rematch
-            const check = await checkLobbyPlayers(newId);
-            if (check.strangers.length > 0) {
-                console.log(`🚨 لوبي rematch فيه غرباء [${check.strangers.join(', ')}] → طردهم`);
-                await kickAllStrangers(newId, check.strangers);
-                await sleep(300);
-                const recheck = await checkLobbyPlayers(newId);
-                if (recheck.strangers.length > 0) {
-                    console.log(`🚨 فشل الطرد → إلغاء الـ rematch`);
-                    await leaveFromBothAccounts(newId);
-                } else {
-                    return { id: newId, usedRematch: true };
-                }
-            } else {
-                return { id: newId, usedRematch: true };
-            }
-        } else {
-            console.log(`⚠️ Rematch فشل → مغادرة فورية من الحسابين`);
-            await leaveFromBothAccounts(oldLobbyId);
+            return { id: newId, usedRematch: true };
         }
+
+        console.log(`⚠️ Rematch فشل → مغادرة فورية من الحسابين`);
+        await leaveFromBothAccounts(oldLobbyId);
     }
 
+    // ═══ 2) إنشاء لوبي جديد (3 محاولات) ═══
     for (let i = 1; i <= MAX_LOBBY_ATTEMPTS; i++) {
         console.log(`📄 محاولة إنشاء لوبي ${i}/${MAX_LOBBY_ATTEMPTS}...`);
         const result = await createLobbyRaw(token);
 
         if (result.ok) {
+            _stuckLobbyAttempts.clear();
             console.log(`✅ لوبي جديد: ${result.id}`);
-
-            // فحص فوري
-            const check = await checkLobbyPlayers(result.id);
-            if (check.strangers.length > 0) {
-                console.log(`🚨 غريب في اللوبي الجديد → طرد`);
-                await kickAllStrangers(result.id, check.strangers);
-            }
-
             return { id: result.id, usedRematch: false };
         }
 
@@ -387,11 +329,22 @@ async function createLobbySmart(token, oldLobbyId = null) {
         const stuckId = m ? m[1] : null;
 
         if (stuckId && errorMsg.includes('already in')) {
-            console.log(`⚠️ عالق في ${stuckId} → مغادرة فورية`);
+            const tries = (_stuckLobbyAttempts.get(stuckId) || 0) + 1;
+            _stuckLobbyAttempts.set(stuckId, tries);
+
+            console.log(`⚠️ عالق في ${stuckId} (محاولة ${tries}/${MAX_STUCK_ATTEMPTS})`);
+
+            // بعد عدة محاولات فاشلة على نفس اللوبي → نتوقف ليُعاد التشغيل الكامل
+            if (tries >= MAX_STUCK_ATTEMPTS) {
+                console.log(`🛑 فشل ${tries} مرات على نفس اللوبي ${stuckId} → يتطلب إعادة تشغيل كاملة`);
+                _stuckLobbyAttempts.delete(stuckId);
+                return null;
+            }
+
             await leaveFromBothAccounts(stuckId);
         } else {
             console.log(`⚠️ محاولة ${i}: ${result.status} ${errorMsg.slice(0, 80)}`);
-            await sleep(1500);
+            await sleep(2000);
         }
     }
 
@@ -423,7 +376,7 @@ async function navigateToMainPage(page, token) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// WS Monitor
+// WS Monitor — يراقب edgegap فقط
 // ═══════════════════════════════════════════════════════════════
 async function installWebSocketMonitor(page) {
     await page.evaluateOnNewDocument(() => {
@@ -646,36 +599,9 @@ async function waitForGameEnd(page1, page2, maxWait) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// لعب جولة واحدة (مُحسّنة: انضمام فوري + فحص مزدوج)
+// لعب جولة واحدة
 // ═══════════════════════════════════════════════════════════════
 async function playOneRound(page1, page2, lobbyId) {
-    // ═══ الخطوة 1: الضيف ينضم فوراً عبر API ═══
-    console.log(`🚪 [فوري] انضمام الضيف للوبي ${lobbyId}...`);
-    const joined = await joinLobby(TOKEN_GUEST, lobbyId, "الضيف");
-    if (!joined) {
-        console.log(`⚠️ فشل انضمام الضيف → إلغاء`);
-        return { started: false, reason: 'guest_join_failed' };
-    }
-
-    // ═══ الخطوة 2: فحص فوري ═══
-    let check = await checkLobbyPlayers(lobbyId);
-    console.log(`   👥 لاعبون: [${(check.ids || []).join(', ')}] | غرباء: ${check.strangers.length}`);
-
-    if (check.strangers.length > 0) {
-        const kicked = await kickAllStrangers(lobbyId, check.strangers);
-        await sleep(400);
-
-        check = await checkLobbyPlayers(lobbyId);
-        console.log(`   👥 بعد الطرد: [${(check.ids || []).join(', ')}]`);
-
-        if (check.strangers.length > 0) {
-            console.log(`🚨 غرباء مصرّون → إلغاء الجولة`);
-            await leaveFromBothAccounts(lobbyId);
-            return { started: false, reason: 'strangers_persist' };
-        }
-    }
-
-    // ═══ الخطوة 3: توجيه الصفحات (متوازٍ) ═══
     console.log(`🌐 توجيه الصفحات للوبي ${lobbyId}...`);
     await Promise.all([
         navigateToLobby(page1, TOKEN_HOST, lobbyId),
@@ -683,27 +609,15 @@ async function playOneRound(page1, page2, lobbyId) {
     ]);
     await sleep(WAIT_AFTER_NAVIGATE);
 
-    // ═══ الخطوة 4: فحص ثانٍ قبل close ═══
-    check = await checkLobbyPlayers(lobbyId);
-    if (check.strangers.length > 0) {
-        console.log(`🚨 غريب تسلل أثناء التوجيه: [${check.strangers.join(', ')}]`);
-        await kickAllStrangers(lobbyId, check.strangers);
-        await sleep(300);
-        check = await checkLobbyPlayers(lobbyId);
-        if (check.strangers.length > 0) {
-            console.log(`🚨 لا يزال موجوداً → إلغاء`);
-            await leaveFromBothAccounts(lobbyId);
-            return { started: false, reason: 'stranger_at_close' };
-        }
-    }
+    console.log(`🚪 انضمام الضيف...`);
+    await joinLobby(TOKEN_GUEST, lobbyId, "الضيف");
+    await sleep(WAIT_AFTER_JOIN);
 
-    // ═══ الخطوة 5: close ═══
     console.log(`🎮 close (بدء اللعبة)...`);
     const closed = await closeLobby(TOKEN_HOST, lobbyId);
     if (!closed) return { started: false, reason: 'close_failed' };
     await sleep(WAIT_AFTER_CLOSE);
 
-    // ═══ الخطوة 6: حقن البيانات ═══
     console.log(`💉 حقن البيانات...`);
     await Promise.all([
         injectData(page1, TOKEN_HOST, USER_ID_HOST, lobbyId),
@@ -819,6 +733,9 @@ class RunContext {
         if (oldT1) deleteTempDir(oldT1);
         if (oldT2) deleteTempDir(oldT2);
 
+        // مسح سجل اللوبيات العالقة عند إعادة التشغيل الكاملة
+        _stuckLobbyAttempts.clear();
+
         await this.init();
     }
 }
@@ -865,7 +782,7 @@ async function runForever() {
                     consecutiveFailures++;
                     console.log(`⚠️ فشل إنشاء لوبي (${consecutiveFailures} متتالي)`);
 
-                    if (consecutiveFailures >= 5) {
+                    if (consecutiveFailures >= 3) {
                         console.log("🔁 إعادة تشغيل كاملة...");
                         await ctx.fullRestart();
                         await Promise.all([
@@ -898,7 +815,7 @@ async function runForever() {
                     consecutiveFailures = 0;
                 } else {
                     lobbyId = null;
-                    if (consecutiveFailures >= 5) {
+                    if (consecutiveFailures >= 3) {
                         await ctx.fullRestart();
                         await Promise.all([
                             navigateToMainPage(ctx.page1, TOKEN_HOST),
@@ -924,9 +841,21 @@ async function runForever() {
                     lobbyId = fresh.id;
                     console.log(`♻️ لوبي جديد جاهز`);
                 } else {
+                    // فشل حتى إنشاء لوبي جديد → إعادة تشغيل كاملة
+                    console.log("🛑 فشل الحصول على لوبي حتى بعد التنظيف → إعادة تشغيل كاملة");
+                    try {
+                        await ctx.fullRestart();
+                        await Promise.all([
+                            navigateToMainPage(ctx.page1, TOKEN_HOST),
+                            navigateToMainPage(ctx.page2, TOKEN_GUEST)
+                        ]);
+                        await sleep(2000);
+                    } catch (e) {
+                        console.error("❌ فشل إعادة التشغيل:", e.message);
+                        await sleep(15000);
+                    }
                     lobbyId = null;
-                    console.log("⚠️ محاولة جديدة بعد 5s");
-                    await sleep(5000);
+                    consecutiveFailures = 0;
                 }
             } else {
                 lobbyId = setup.id;
