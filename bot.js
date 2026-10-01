@@ -5,7 +5,7 @@ const os = require('os');
 const { loadTokens } = require('./token-loader.js');
 
 // ═══════════════════════════════════════════════════════════════
-// بيانات الحسابات (يتم تعبئتها من GitHub في الأسفل)
+// بيانات الحسابات (تُعبّأ من GitHub في الأسفل)
 // ═══════════════════════════════════════════════════════════════
 let TOKEN_HOST = '';
 let TOKEN_GUEST = '';
@@ -21,7 +21,7 @@ const MAX_WAIT_START = 40000;
 const MAX_PLAY_TIME = 5 * 60 * 1000;
 const POLL_INTERVAL = 200;
 const MAX_LOBBY_ATTEMPTS = 3;
-const MAX_STUCK_ATTEMPTS = 3;   // عدد المحاولات على نفس اللوبي العالق قبل إعادة التشغيل الكامل
+const MAX_STUCK_ATTEMPTS = 3;
 const WAIT_AFTER_NAVIGATE = 3000;
 const WAIT_AFTER_JOIN = 1000;
 const WAIT_AFTER_CLOSE = 2500;
@@ -29,30 +29,22 @@ const WAIT_AFTER_INJECT = 1000;
 const WAIT_AFTER_LEAVE = 2000;
 
 // ═══════════════════════════════════════════════════════════════
-// إعدادات اللعبة
+// إعدادات اللعبة (Penalty Shootout / Golden Goal)
 // ═══════════════════════════════════════════════════════════════
-const EXPERIENCE_ID = 6;
-const LOBBY_TYPE_ID = 5;
-const EXPERIENCE_BUILD_VERSION = "4.8.17";
-const EXPERIENCE_PATH = `/experience/xo_battles/${EXPERIENCE_BUILD_VERSION}/index.html`;
+const EXPERIENCE_ID = 9;
+const LOBBY_TYPE_ID = 13;
+const EXPERIENCE_BUILD_VERSION = "4.8.14";
+const EXPERIENCE_PATH = `/experience/golden_goal/${EXPERIENCE_BUILD_VERSION}/index.html`;
+const LOBBY_DISPLAY_NAME = "ㅤ⚽ Penalty Shootout ㅤ";
 
 // ═══════════════════════════════════════════════════════════════
-// إحداثيات النقرات
+// إحداثيات السحب (بدل النقرات)
 // ═══════════════════════════════════════════════════════════════
-const CLICKS_GUEST = [
-    { x: 200, y: 271 },
-    { x: 200, y: 338 },
-    { x: 200, y: 390 }
-];
-const CLICKS_HOST = [
-    { x: 353, y: 350 },
-    { x: 360, y: 397 },
-    { x: 312, y: 389 }
-];
-const DELAY_BETWEEN_CLICKS = 40;
-const DELAY_AFTER_GUEST = 60;
-const DELAY_AFTER_HOST = 100;
-const TARGET_CYCLE_MS = 500;
+const GUEST_DRAG_FROM = { x: 300, y: 338 };
+const GUEST_DRAG_TO   = { x: 264, y: 470 };
+const HOST_DRAG_FROM  = { x: 300, y: 338 };
+const HOST_DRAG_TO    = { x: 264, y: 300 };
+const DRAG_INTERVAL = 3000; // كل 3 ثوان سحب للحسابين
 
 // ═══════════════════════════════════════════════════════════════
 // رؤوس HTTP
@@ -78,9 +70,9 @@ function deleteTempDir(dir) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// تتبع اللوبيات العالقة (لمنع الحلقات المفرغة)
+// تتبع اللوبيات العالقة
 // ═══════════════════════════════════════════════════════════════
-const _stuckLobbyAttempts = new Map(); // { lobbyId: عدد المحاولات }
+const _stuckLobbyAttempts = new Map();
 
 // ═══════════════════════════════════════════════════════════════
 // API: الجلسات
@@ -139,7 +131,7 @@ async function leaveFromBothAccounts(lobbyId) {
         "content-length": "0"
     };
 
-    // ═══ 1) الضيف: مغادرة عادية (قد تفشل بـ 403 إن لم يكن فيه — طبيعي) ═══
+    // 1) الضيف: مغادرة عادية
     try {
         const r = await fetch(`https://experience.palringo.com/lobby/id/${lobbyId}/user`, {
             method: "DELETE",
@@ -148,39 +140,31 @@ async function leaveFromBothAccounts(lobbyId) {
         console.log(`   [الضيف] leave → ${r.status}`);
     } catch (e) {}
 
-    // ═══ 2) المالك: DELETE اللوبي بالكامل (الحل الصحيح — leave يفشل للمالك) ═══
+    // 2) المالك: DELETE اللوبي بالكامل
     try {
         const r = await fetch(`https://experience.palringo.com/lobby/id/${lobbyId}`, {
             method: "DELETE",
             headers: hostHeaders
         });
         console.log(`   [المنشئ] DELETE /lobby → ${r.status}`);
-
         if (r.status === 200 || r.status === 204) {
-            console.log(`   ✅ تم حذف اللوبي ${lobbyId} من السيرفر`);
+            console.log(`   ✅ تم حذف اللوبي ${lobbyId}`);
             await sleep(WAIT_AFTER_LEAVE);
             return true;
-        }
-
-        // اطبع تفاصيل الفشل إن وُجدت
-        if (r.status === 403 || r.status === 400) {
-            const text = await r.text().catch(() => '');
-            if (text) console.log(`   تفاصيل: ${text.slice(0, 150)}`);
         }
     } catch (e) {
         console.log(`   ❌ DELETE /lobby: ${e.message}`);
     }
 
-    // ═══ 3) المالك: close (احتياطي) ═══
+    // 3) المالك: close (احتياطي)
     try {
         const r = await fetch(`https://experience.palringo.com/lobby/id/${lobbyId}/close`, {
-            method: "POST",
-            headers: hostHeaders
+            method: "POST", headers: hostHeaders
         });
         console.log(`   [المنشئ] close → ${r.status}`);
     } catch (e) {}
 
-    // ═══ 4) المالك: leave (احتياطي — قد يفشل بـ 403 للمالك، لكن نجرّب) ═══
+    // 4) المالك: leave (احتياطي)
     try {
         const r = await fetch(`https://experience.palringo.com/lobby/id/${lobbyId}/user`, {
             method: "DELETE",
@@ -205,7 +189,7 @@ async function createLobbyRaw(token) {
             groupId: GROUP_ID,
             visibility: "global",
             access: "public",
-            displayName: "❌ XO Battles",
+            displayName: LOBBY_DISPLAY_NAME,
             data: "",
             ownerUserData: "",
             ownerPlayerIp: "0.0.0.0"
@@ -236,7 +220,7 @@ async function closeLobby(token, lobbyId) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// API: Rematch — مرة واحدة فقط + معالجة code 55
+// API: Rematch — مرة واحدة فقط + معالجة code 55 / code 5
 // ═══════════════════════════════════════════════════════════════
 async function rematchLobby(token, lobbyId) {
     const headers = { ...baseHeaders, "authorization": `Bearer ${token}` };
@@ -265,7 +249,6 @@ async function rematchLobby(token, lobbyId) {
                     return lobbyId;
                 }
             }
-
             return null;
         }
 
@@ -301,19 +284,16 @@ async function joinLobby(token, lobbyId, accountName = "guest") {
 // إنشاء لوبي ذكي — مع كشف الحلقة العالقة
 // ═══════════════════════════════════════════════════════════════
 async function createLobbySmart(token, oldLobbyId = null) {
-    // ═══ 1) محاولة Rematch مرة واحدة فقط ═══
     if (oldLobbyId) {
         console.log(`🔄 Rematch (مرة واحدة) على ${oldLobbyId}...`);
         const newId = await rematchLobby(token, oldLobbyId);
         if (newId) {
             return { id: newId, usedRematch: true };
         }
-
         console.log(`⚠️ Rematch فشل → مغادرة فورية من الحسابين`);
         await leaveFromBothAccounts(oldLobbyId);
     }
 
-    // ═══ 2) إنشاء لوبي جديد (3 محاولات) ═══
     for (let i = 1; i <= MAX_LOBBY_ATTEMPTS; i++) {
         console.log(`📄 محاولة إنشاء لوبي ${i}/${MAX_LOBBY_ATTEMPTS}...`);
         const result = await createLobbyRaw(token);
@@ -331,16 +311,13 @@ async function createLobbySmart(token, oldLobbyId = null) {
         if (stuckId && errorMsg.includes('already in')) {
             const tries = (_stuckLobbyAttempts.get(stuckId) || 0) + 1;
             _stuckLobbyAttempts.set(stuckId, tries);
-
             console.log(`⚠️ عالق في ${stuckId} (محاولة ${tries}/${MAX_STUCK_ATTEMPTS})`);
 
-            // بعد عدة محاولات فاشلة على نفس اللوبي → نتوقف ليُعاد التشغيل الكامل
             if (tries >= MAX_STUCK_ATTEMPTS) {
-                console.log(`🛑 فشل ${tries} مرات على نفس اللوبي ${stuckId} → يتطلب إعادة تشغيل كاملة`);
+                console.log(`🛑 فشل ${tries} مرات على نفس اللوبي → إعادة تشغيل كاملة`);
                 _stuckLobbyAttempts.delete(stuckId);
                 return null;
             }
-
             await leaveFromBothAccounts(stuckId);
         } else {
             console.log(`⚠️ محاولة ${i}: ${result.status} ${errorMsg.slice(0, 80)}`);
@@ -376,7 +353,7 @@ async function navigateToMainPage(page, token) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// WS Monitor — يراقب edgegap فقط
+// WS Monitor — يراقب edgegap (سيرفر اللعبة)
 // ═══════════════════════════════════════════════════════════════
 async function installWebSocketMonitor(page) {
     await page.evaluateOnNewDocument(() => {
@@ -417,10 +394,7 @@ async function installWebSocketMonitor(page) {
                 console.log(`🏁 [${((Date.now()-M.startTime)/1000).toFixed(1)}s] WS اللعبة انفصل #${M.disconnectCount} code=${e.code}`);
             });
 
-            ws.addEventListener('message', () => {
-                if (!isGameWs) return;
-                M.recvCount++;
-            });
+            ws.addEventListener('message', () => { if (isGameWs) M.recvCount++; });
 
             const origSend = ws.send.bind(ws);
             ws.send = function(data) {
@@ -503,24 +477,34 @@ async function injectData(page, token, userId, lobbyId) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// النقرات
+// السحب (بدل النقرات)
 // ═══════════════════════════════════════════════════════════════
-async function clickSequence(page, clicks) {
-    for (const [i, c] of clicks.entries()) {
-        await page.mouse.click(c.x, c.y);
-        if (i < clicks.length - 1) await sleep(DELAY_BETWEEN_CLICKS);
+async function performDrag(page, accountName, fromX, fromY, toX, toY) {
+    try {
+        await page.mouse.move(fromX, fromY);
+        await sleep(150);
+        await page.mouse.down();
+        await sleep(200);
+        await page.mouse.move(toX, toY, { steps: 15 });
+        await sleep(200);
+        await page.mouse.up();
+    } catch (e) {
+        console.error(`[${accountName}] خطأ سحب:`, e.message);
     }
 }
 
 async function performFullCycle(pageGuest, pageHost) {
-    await clickSequence(pageGuest, CLICKS_GUEST);
-    await sleep(DELAY_AFTER_GUEST);
-    await clickSequence(pageHost, CLICKS_HOST);
-    await sleep(DELAY_AFTER_HOST);
+    await performDrag(pageGuest, "الضيف",
+        GUEST_DRAG_FROM.x, GUEST_DRAG_FROM.y,
+        GUEST_DRAG_TO.x,   GUEST_DRAG_TO.y);
+    await sleep(80);
+    await performDrag(pageHost, "المنشئ",
+        HOST_DRAG_FROM.x, HOST_DRAG_FROM.y,
+        HOST_DRAG_TO.x,   HOST_DRAG_TO.y);
 }
 
 // ═══════════════════════════════════════════════════════════════
-// انتظار بدء اللعبة
+// انتظار بدء اللعبة (WS edgegap)
 // ═══════════════════════════════════════════════════════════════
 async function waitForGameStart(page1, page2, maxWait) {
     console.log(`⏳ انتظار بدء اللعبة (edgegap WS)...`);
@@ -550,13 +534,14 @@ async function waitForGameStart(page1, page2, maxWait) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// انتظار نهاية اللعبة
+// حلقة اللعب — سحب مستمر حتى انفصال WS
 // ═══════════════════════════════════════════════════════════════
 async function waitForGameEnd(page1, page2, maxWait) {
     console.log(`🎮 اللعب حتى النهاية...`);
     const start = Date.now();
-    let clicks = 0;
+    let drags = 0;
     let lastLog = 0;
+    let lastDragTime = 0;
 
     while (Date.now() - start < maxWait) {
         const m = await getMonitor(page1);
@@ -567,35 +552,28 @@ async function waitForGameEnd(page1, page2, maxWait) {
             const m2 = await getMonitor(page1);
             if (m2 && !m2.connected && m2.disconnectCount >= 1) {
                 const elapsed = ((Date.now() - start) / 1000).toFixed(1);
-                console.log(`🏆 انتهت اللعبة (${clicks} نقرة، ${elapsed}s)`);
-                return { ended: true, clicks };
+                console.log(`🏆 انتهت اللعبة (${drags} سحب، ${elapsed}s)`);
+                return { ended: true, drags };
             }
         }
 
         if (m.connected) {
-            const cycleStart = Date.now();
-            clicks++;
-            if (clicks % 10 === 1) {
-                const elapsed = Math.floor((Date.now() - start) / 1000);
-                console.log(`   🎯 ${clicks} نقرة (${elapsed}s)`);
+            const now = Date.now();
+            if (now - lastDragTime >= DRAG_INTERVAL) {
+                lastDragTime = now;
+                drags++;
+                if (drags % 5 === 1) {
+                    const elapsed = Math.floor((Date.now() - start) / 1000);
+                    console.log(`   🎯 ${drags} سحب (${elapsed}s)`);
+                }
+                await performFullCycle(page2, page1);
             }
-            await performFullCycle(page2, page1);
-            const elapsed = Date.now() - cycleStart;
-            const remaining = TARGET_CYCLE_MS - elapsed;
-            if (remaining > 0) await sleep(remaining);
-        } else {
-            await sleep(100);
         }
-
-        const elapsed = Math.floor((Date.now() - start) / 1000);
-        if (elapsed >= lastLog + 10) {
-            lastLog = elapsed;
-            console.log(`   ⏱️ ${elapsed}s | connected=${m.connected} clicks=${clicks}`);
-        }
+        await sleep(100);
     }
 
-    console.log(`⏹️ انتهت المدة (${clicks} نقرة)`);
-    return { ended: false, clicks };
+    console.log(`⏹️ انتهت المدة (${drags} سحب)`);
+    return { ended: false, drags };
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -632,7 +610,7 @@ async function playOneRound(page1, page2, lobbyId) {
     if (!started) return { started: false, reason: 'no_ws' };
 
     const result = await waitForGameEnd(page1, page2, MAX_PLAY_TIME);
-    return { started: true, ended: result.ended, clicks: result.clicks };
+    return { started: true, ended: result.ended, drags: result.drags };
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -733,9 +711,7 @@ class RunContext {
         if (oldT1) deleteTempDir(oldT1);
         if (oldT2) deleteTempDir(oldT2);
 
-        // مسح سجل اللوبيات العالقة عند إعادة التشغيل الكاملة
         _stuckLobbyAttempts.clear();
-
         await this.init();
     }
 }
@@ -805,8 +781,11 @@ async function runForever() {
 
             const result = await playOneRound(ctx.page1, ctx.page2, lobbyId);
 
+            // ═══ لم تبدأ اللعبة → نحاول تفكيك اللوبي والخروج ═══
             if (!result.started) {
-                console.log(`⚠️ فشل البدء (${result.reason})`);
+                console.log(`⚠️ فشل البدء (${result.reason}) → محاولة الخروج من اللوبي`);
+                await leaveFromBothAccounts(lobbyId);
+
                 consecutiveFailures++;
 
                 const setup = await createLobbySmart(TOKEN_HOST, null);
@@ -841,7 +820,6 @@ async function runForever() {
                     lobbyId = fresh.id;
                     console.log(`♻️ لوبي جديد جاهز`);
                 } else {
-                    // فشل حتى إنشاء لوبي جديد → إعادة تشغيل كاملة
                     console.log("🛑 فشل الحصول على لوبي حتى بعد التنظيف → إعادة تشغيل كاملة");
                     try {
                         await ctx.fullRestart();
