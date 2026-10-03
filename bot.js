@@ -44,7 +44,7 @@ const GUEST_DRAG_FROM = { x: 300, y: 338 };
 const GUEST_DRAG_TO   = { x: 264, y: 470 };
 const HOST_DRAG_FROM  = { x: 300, y: 338 };
 const HOST_DRAG_TO    = { x: 264, y: 300 };
-const DRAG_INTERVAL = 1000; // كل 3 ثوان سحب للحسابين
+const DRAG_INTERVAL = 500; // كل 3 ثوان سحب للحسابين
 
 // ═══════════════════════════════════════════════════════════════
 // رؤوس HTTP
