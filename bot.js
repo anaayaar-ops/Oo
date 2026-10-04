@@ -34,10 +34,9 @@ const VERIFY_MEMBERS_DELAY = 800;
 const SKIP_VIDEOS = true;
 
 // ═══════════════════════════════════════════════════════════════
-// مُسرِّعات الوقت داخل اللعبة
+// مُسرِّع الوقت داخل اللعبة (Unity WebGL)
 // ═══════════════════════════════════════════════════════════════
-const RAF_SCALE = 3;      // تسريع حلقة الرسم (حركة اللعبة)
-const TIMER_SCALE = 3;    // تسريع العدّادات (setTimeout/setInterval) — مثل "3 ثواني قبل الرمية"
+const TIME_SCALE = 3; // جرّب 2 أو 4 أو 5 حسب النتيجة
 
 // ═══════════════════════════════════════════════════════════════
 // إعدادات اللعبة
@@ -425,49 +424,53 @@ async function navigateToMainPage(page, token) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// تسريع ساعة اللعبة الداخلية (RAF + performance.now + Timers)
+// ⏩ مُسرِّع الوقت — يخدع Unity بتمرير الوقت أسرع
 // ═══════════════════════════════════════════════════════════════
-async function installTimeAccelerator(page, rafScale = RAF_SCALE, timerScale = TIMER_SCALE) {
-    await page.evaluateOnNewDocument((rafScale, timerScale) => {
+async function installTimeAccelerator(page, scale = TIME_SCALE) {
+    await page.evaluateOnNewDocument((scale) => {
         if (window.__timeAccelInstalled) return;
         window.__timeAccelInstalled = true;
-        window.__rafScale = rafScale;
-        window.__timerScale = timerScale;
 
-        // 1) RAF — يمرر الوقت داخل callback بسرعة rafScale
-        const _raf = window.requestAnimationFrame.bind(window);
-        const _now = performance.now.bind(performance);
-        const t0 = _now();
-        window.requestAnimationFrame = (cb) =>
-            _raf((t) => cb(t0 + (t - t0) * rafScale));
+        const _perfNow = performance.now.bind(performance);
+        const _dateNow = Date.now.bind(Date);
+        const t0Perf = _perfNow();
+        const t0Date = _dateNow();
 
-        // 2) performance.now — محركات الألعاب تعتمد عليه لحساب deltaTime
+        // 1) performance.now() — Unity يعتمد عليه لـ Time.deltaTime
         try {
             Object.defineProperty(performance, 'now', {
                 configurable: true,
-                value: () => t0 + (_now() - t0) * rafScale
+                value: () => t0Perf + (_perfNow() - t0Perf) * scale
             });
         } catch (e) {}
 
-        // 3) setTimeout / setInterval — يُقصّر كل عدّاد (مثل "3 ثواني قبل الرمية")
-        const _setTimeout  = window.setTimeout;
-        const _setInterval = window.setInterval;
+        // 2) Date.now() — بعض أنظمة Unity تعتمد عليه
+        try {
+            Date.now = () => t0Date + (_dateNow() - t0Date) * scale;
+        } catch (e) {}
 
-        window.setTimeout = function (fn, ms, ...args) {
-            const d = typeof ms === 'number' ? ms : 0;
-            return _setTimeout(fn, Math.max(0, d / timerScale), ...args);
-        };
-        window.setInterval = function (fn, ms, ...args) {
-            const d = typeof ms === 'number' ? ms : 0;
-            return _setInterval(fn, Math.max(1, d / timerScale), ...args);
-        };
+        // 3) requestAnimationFrame — يمرر timestamp متقدم
+        const _raf = window.requestAnimationFrame.bind(window);
+        window.requestAnimationFrame = (cb) =>
+            _raf((t) => {
+                const scaled = t0Perf + (t - t0Perf) * scale;
+                cb(scaled);
+            });
 
-        console.log(`⏩ مُسرِّع الوقت: RAF×${rafScale}, Timers×${timerScale}`);
-    }, rafScale, timerScale);
+        // 4) setTimeout / setInterval — تُقصَّر
+        const _st = window.setTimeout;
+        const _si = window.setInterval;
+        window.setTimeout = (fn, ms, ...a) =>
+            _st(fn, Math.max(0, (typeof ms === 'number' ? ms : 0) / scale), ...a);
+        window.setInterval = (fn, ms, ...a) =>
+            _si(fn, Math.max(1, (typeof ms === 'number' ? ms : 0) / scale), ...a);
+
+        console.log(`⏩ TimeAccelerator ON (×${scale})`);
+    }, scale);
 }
 
 // ═══════════════════════════════════════════════════════════════
-// تسريع الفيديوهات — عنيف جداً
+// تسريع الفيديوهات — عنيف
 // ═══════════════════════════════════════════════════════════════
 async function installVideoSkip(page) {
     if (!SKIP_VIDEOS) return;
@@ -522,30 +525,6 @@ async function installVideoSkip(page) {
             if (this.tagName === 'VIDEO') nuke(this);
             return r;
         };
-
-        try {
-            const d = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'autoplay');
-            if (d && d.set) Object.defineProperty(HTMLMediaElement.prototype, 'autoplay', {
-                configurable: true,
-                get: d.get,
-                set: function (val) { d.set.call(this, val); if (this.tagName === 'VIDEO') nuke(this); }
-            });
-        } catch (e) {}
-
-        try {
-            const d = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'currentTime');
-            if (d && d.set) Object.defineProperty(HTMLMediaElement.prototype, 'currentTime', {
-                configurable: true,
-                get: d.get,
-                set: function (val) {
-                    if (this.tagName === 'VIDEO') {
-                        try { d.set.call(this, 1e9); } catch (e) {}
-                    } else {
-                        d.set.call(this, val);
-                    }
-                }
-            });
-        } catch (e) {}
 
         new MutationObserver((muts) => {
             for (const m of muts) for (const nd of m.addedNodes) {
@@ -978,9 +957,9 @@ class RunContext {
         await this.page1.setUserAgent(UA);
         await this.page2.setUserAgent(UA);
 
-        // ترتيب مهم: تسريع الوقت أولاً
-        await installTimeAccelerator(this.page1, RAF_SCALE, TIMER_SCALE);
-        await installTimeAccelerator(this.page2, RAF_SCALE, TIMER_SCALE);
+        // ترتيب مهم: مُسرِّع الوقت أولاً، ثم المراقبات، ثم الفيديوهات
+        await installTimeAccelerator(this.page1, TIME_SCALE);
+        await installTimeAccelerator(this.page2, TIME_SCALE);
         await installWebSocketMonitor(this.page1);
         await installWebSocketMonitor(this.page2);
         await installVideoSkip(this.page1);
