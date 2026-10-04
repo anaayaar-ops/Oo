@@ -36,7 +36,7 @@ const SKIP_VIDEOS = true;
 // ═══════════════════════════════════════════════════════════════
 // مُسرِّع الوقت داخل اللعبة (Unity WebGL)
 // ═══════════════════════════════════════════════════════════════
-const TIME_SCALE = 3; // جرّب 2 أو 4 أو 5 حسب النتيجة
+const TIME_SCALE = 5;
 
 // ═══════════════════════════════════════════════════════════════
 // إعدادات اللعبة
@@ -48,75 +48,13 @@ const EXPERIENCE_PATH = `/experience/golden_goal/${EXPERIENCE_BUILD_VERSION}/ind
 const LOBBY_DISPLAY_NAME = "ㅤ⚽ Penalty Shootout ㅤ";
 
 // ═══════════════════════════════════════════════════════════════
-// السحب
+// السحب — إحداثيات ثابتة (بدون تعلّم)
 // ═══════════════════════════════════════════════════════════════
 const GUEST_DRAG_FROM = { x: 300, y: 338 };
-const GUEST_DY = 132;
+const GUEST_DRAG_TO   = { x: 264, y: 470 };
 const HOST_DRAG_FROM  = { x: 300, y: 338 };
 const HOST_DRAG_TO    = { x: 264, y: 300 };
-const DRAG_INTERVAL = 500;
-
-// ═══════════════════════════════════════════════════════════════
-// المتعلّم
-// ═══════════════════════════════════════════════════════════════
-const ARMS = [-18, -12, -6, 0, 6, 12, 15, 18];
-const STATS_FILE = path.join(__dirname, 'learner-stats.json');
-const stats = new Map(ARMS.map(a => [a, { w: 0, l: 0 }]));
-stats.set(15, { w: 4, l: 1 });
-stats.set(12, { w: 0, l: 0 });
-stats.set(0,  { w: 1, l: 2 });
-
-try {
-    const saved = JSON.parse(fs.readFileSync(STATS_FILE, 'utf8'));
-    for (const [k, v] of Object.entries(saved)) if (stats.has(Number(k))) stats.set(Number(k), v);
-    console.log('📚 تم تحميل إحصاءات سابقة للمتعلّم');
-} catch (e) {}
-
-let currentArm = 15;
-const pendingShots = [];
-
-const armMean = (a) => { const s = stats.get(a); return (s.w + 1) / (s.w + s.l + 2); };
-const totalShots = () => [...stats.values()].reduce((n, s) => n + s.w + s.l, 0);
-
-function pickArm() {
-    const eps = totalShots() < 30 ? 0.3 : 0.1;
-    if (Math.random() < eps) return ARMS[Math.floor(Math.random() * ARMS.length)];
-    return ARMS.reduce((b, a) => armMean(a) > armMean(b) ? a : b);
-}
-
-function armTarget(a) {
-    const dx = -Math.round(GUEST_DY * Math.tan(a * Math.PI / 180));
-    return { x: GUEST_DRAG_FROM.x + dx, y: GUEST_DRAG_FROM.y + GUEST_DY };
-}
-
-function learn(ang, outcome) {
-    const arm = ARMS.reduce((b, a) => Math.abs(a - ang) < Math.abs(b - ang) ? a : b);
-    const s = stats.get(arm);
-    if (outcome === 'goal') s.w++; else s.l++;
-    console.log(`   📊 ${ang.toFixed(0)}° → ${outcome} | ` +
-        [...stats].map(([a, v]) => `${a}:${v.w}/${v.w + v.l}`).join(' '));
-    try { fs.writeFileSync(STATS_FILE, JSON.stringify(Object.fromEntries(stats))); } catch (e) {}
-    currentArm = pickArm();
-}
-
-async function pollShots(page) {
-    const r = await page.evaluate(() => {
-        const M = window.__gameMonitor; if (!M) return null;
-        const now = Date.now();
-        M.events = M.events.filter(e => now - e.t < 15000);
-        return { shots: M.shots.splice(0), events: M.events.slice(), now };
-    }).catch(() => null);
-    if (!r) return;
-    pendingShots.push(...r.shots);
-    for (let i = pendingShots.length - 1; i >= 0; i--) {
-        const s = pendingShots[i];
-        if (r.now - s.t < 2000) continue;
-        pendingShots.splice(i, 1);
-        const w = new Set(r.events.filter(e => e.t >= s.t && e.t <= s.t + 1500).map(e => e.type));
-        const outcome = w.has(65531) ? 'goal' : w.has(65493) ? 'save' : w.has(65499) ? 'wall' : 'out';
-        learn(Math.atan2(s.x, s.y) * 180 / Math.PI, outcome);
-    }
-}
+const DRAG_INTERVAL = 500; // كل ثانية سحب للحسابين
 
 // ═══════════════════════════════════════════════════════════════
 // رؤوس HTTP
@@ -424,7 +362,7 @@ async function navigateToMainPage(page, token) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// ⏩ مُسرِّع الوقت — يخدع Unity بتمرير الوقت أسرع
+// ⏩ مُسرِّع الوقت
 // ═══════════════════════════════════════════════════════════════
 async function installTimeAccelerator(page, scale = TIME_SCALE) {
     await page.evaluateOnNewDocument((scale) => {
@@ -436,7 +374,6 @@ async function installTimeAccelerator(page, scale = TIME_SCALE) {
         const t0Perf = _perfNow();
         const t0Date = _dateNow();
 
-        // 1) performance.now() — Unity يعتمد عليه لـ Time.deltaTime
         try {
             Object.defineProperty(performance, 'now', {
                 configurable: true,
@@ -444,12 +381,10 @@ async function installTimeAccelerator(page, scale = TIME_SCALE) {
             });
         } catch (e) {}
 
-        // 2) Date.now() — بعض أنظمة Unity تعتمد عليه
         try {
             Date.now = () => t0Date + (_dateNow() - t0Date) * scale;
         } catch (e) {}
 
-        // 3) requestAnimationFrame — يمرر timestamp متقدم
         const _raf = window.requestAnimationFrame.bind(window);
         window.requestAnimationFrame = (cb) =>
             _raf((t) => {
@@ -457,11 +392,10 @@ async function installTimeAccelerator(page, scale = TIME_SCALE) {
                 cb(scaled);
             });
 
-        // 4) setTimeout / setInterval — تُقصَّر
         const _st = window.setTimeout;
         const _si = window.setInterval;
         window.setTimeout = (fn, ms, ...a) =>
-            _st(fn, Math.max(0, (typeof ms === 'number' ? ms : 0) / scale), ...a);
+            _st(fn, Math.max(1, (typeof ms === 'number' ? ms : 0) / scale), ...a);
         window.setInterval = (fn, ms, ...a) =>
             _si(fn, Math.max(1, (typeof ms === 'number' ? ms : 0) / scale), ...a);
 
@@ -470,7 +404,7 @@ async function installTimeAccelerator(page, scale = TIME_SCALE) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// تسريع الفيديوهات — عنيف
+// تسريع الفيديوهات
 // ═══════════════════════════════════════════════════════════════
 async function installVideoSkip(page) {
     if (!SKIP_VIDEOS) return;
@@ -549,7 +483,7 @@ async function installVideoSkip(page) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// WS Monitor
+// WS Monitor — بدون تتبّع shots/events (لا حاجة للتعلّم)
 // ═══════════════════════════════════════════════════════════════
 async function installWebSocketMonitor(page) {
     await page.evaluateOnNewDocument(() => {
@@ -562,9 +496,7 @@ async function installWebSocketMonitor(page) {
             recvCount: 0,
             sendCount: 0,
             connected: false,
-            allWsUrls: [],
-            events: [],
-            shots: []
+            allWsUrls: []
         };
 
         const OrigWS = window.WebSocket;
@@ -592,41 +524,15 @@ async function installWebSocketMonitor(page) {
                 console.log(`🏁 WS اللعبة انفصل #${M.disconnectCount}`);
             });
 
-            const noteEvent = (buf) => {
-                try {
-                    if (buf.byteLength >= 6) {
-                        const t = new DataView(buf).getUint16(4, true);
-                        if (t === 65493 || t === 65499 || t === 65531 || t === 65523)
-                            M.events.push({ t: Date.now(), type: t });
-                    }
-                } catch (_) {}
-            };
-
-            ws.addEventListener('message', (e) => {
+            ws.addEventListener('message', () => {
                 if (!isGameWs) return;
                 M.recvCount++;
-                const d = e.data;
-                if (d instanceof ArrayBuffer) noteEvent(d);
-                else if (typeof Blob !== 'undefined' && d instanceof Blob) d.arrayBuffer().then(noteEvent).catch(() => {});
             });
 
             const origSend = ws.send.bind(ws);
             ws.send = function(data) {
                 if (!isGameWs) return origSend(data);
                 M.sendCount++;
-                try {
-                    const u8 = data instanceof ArrayBuffer ? new Uint8Array(data)
-                        : ArrayBuffer.isView(data) ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength) : null;
-                    if (u8 && u8.length > 40 && u8[4] === 8 && u8[5] === 0) {
-                        const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
-                        for (let i = 6; i < u8.length - 20; i++) {
-                            if (u8[i] === 0x2c && u8[i + 1] === 0x08) {
-                                M.shots.push({ t: Date.now(), x: dv.getFloat32(i + 7, true), y: dv.getFloat32(i + 11, true) });
-                                break;
-                            }
-                        }
-                    }
-                } catch (_) {}
                 return origSend(data);
             };
 
@@ -666,8 +572,6 @@ async function resetMonitor(page) {
                 M.recvCount = 0;
                 M.sendCount = 0;
                 M.allWsUrls = [];
-                M.events = [];
-                M.shots = [];
                 M.startTime = Date.now();
             }
         });
@@ -707,7 +611,7 @@ async function injectData(page, token, userId, lobbyId) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// السحب
+// السحب — إحداثيات ثابتة
 // ═══════════════════════════════════════════════════════════════
 async function performDrag(page, accountName, fromX, fromY, toX, toY) {
     try {
@@ -724,9 +628,9 @@ async function performDrag(page, accountName, fromX, fromY, toX, toY) {
 }
 
 async function performFullCycle(pageGuest, pageHost) {
-    const to = armTarget(currentArm);
     await performDrag(pageGuest, "الضيف",
-        GUEST_DRAG_FROM.x, GUEST_DRAG_FROM.y, to.x, to.y);
+        GUEST_DRAG_FROM.x, GUEST_DRAG_FROM.y,
+        GUEST_DRAG_TO.x,   GUEST_DRAG_TO.y);
     await sleep(60);
     await performDrag(pageHost, "المنشئ",
         HOST_DRAG_FROM.x, HOST_DRAG_FROM.y,
@@ -755,7 +659,7 @@ async function waitForGameStart(page1, page2, maxWait) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// حلقة اللعب
+// حلقة اللعب — سحب ثابت حتى نهاية المباراة
 // ═══════════════════════════════════════════════════════════════
 async function waitForGameEnd(page1, page2, maxWait) {
     console.log(`🎮 اللعب حتى النهاية...`);
@@ -767,13 +671,10 @@ async function waitForGameEnd(page1, page2, maxWait) {
         const m = await getMonitor(page1);
         if (!m) { await sleep(80); continue; }
 
-        await pollShots(page2);
-
         if (!m.connected && m.disconnectCount >= 1) {
             await sleep(END_CONFIRM_WAIT);
             const m2 = await getMonitor(page1);
             if (m2 && !m2.connected && m2.disconnectCount >= 1) {
-                await pollShots(page2);
                 console.log(`🏆 انتهت اللعبة (${drags} سحب، ${((Date.now()-start)/1000).toFixed(1)}s)`);
                 return { ended: true, drags };
             }
@@ -847,7 +748,6 @@ async function playOneRound(page1, page2, lobbyId) {
 
     await resetMonitor(page1);
     await resetMonitor(page2);
-    pendingShots.length = 0;
 
     const started = await waitForGameStart(page1, page2, MAX_WAIT_START);
     lap('ws');
@@ -877,7 +777,7 @@ async function playOneRound(page1, page2, lobbyId) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// RunContext — متصفح واحد + سياقان معزولان
+// RunContext
 // ═══════════════════════════════════════════════════════════════
 class RunContext {
     constructor() {
@@ -957,7 +857,6 @@ class RunContext {
         await this.page1.setUserAgent(UA);
         await this.page2.setUserAgent(UA);
 
-        // ترتيب مهم: مُسرِّع الوقت أولاً، ثم المراقبات، ثم الفيديوهات
         await installTimeAccelerator(this.page1, TIME_SCALE);
         await installTimeAccelerator(this.page2, TIME_SCALE);
         await installWebSocketMonitor(this.page1);
