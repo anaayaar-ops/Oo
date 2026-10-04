@@ -29,9 +29,15 @@ const WAIT_AFTER_INJECT = 700;
 const WAIT_AFTER_LEAVE = 1200;
 const END_CONFIRM_WAIT = 2500;
 const MIN_DRAGS_FOR_REAL_GAME = 5;
-const VERIFY_MEMBERS_DELAY = 800;   // انتظار قبل التحقق من العضويات
+const VERIFY_MEMBERS_DELAY = 800;
 
 const SKIP_VIDEOS = true;
+
+// ═══════════════════════════════════════════════════════════════
+// مُسرِّعات الوقت داخل اللعبة
+// ═══════════════════════════════════════════════════════════════
+const RAF_SCALE = 3;      // تسريع حلقة الرسم (حركة اللعبة)
+const TIMER_SCALE = 3;    // تسريع العدّادات (setTimeout/setInterval) — مثل "3 ثواني قبل الرمية"
 
 // ═══════════════════════════════════════════════════════════════
 // إعدادات اللعبة
@@ -199,12 +205,10 @@ async function getLobbyMembers(lobbyId) {
             });
             if (!res.ok) continue;
             const data = await res.json();
-            // جرّب صيغ مختلفة للحقل
             const arr = data.users || data.members || data.userList || data.players;
             if (Array.isArray(arr)) {
                 return arr.map(u => Number(u.userId ?? u.id ?? u.user_id ?? 0)).filter(Boolean);
             }
-            // أحياناً الحقل object
             if (arr && typeof arr === 'object') {
                 return Object.values(arr).map(u => Number(u.userId ?? u.id ?? 0)).filter(Boolean);
             }
@@ -213,7 +217,6 @@ async function getLobbyMembers(lobbyId) {
     return null;
 }
 
-// يعيد: true = آمن، false = يوجد غريب، null = تعذّر التحقق
 async function verifyOnlyOurAccounts(lobbyId) {
     const ids = await getLobbyMembers(lobbyId);
     if (!ids) return null;
@@ -422,54 +425,147 @@ async function navigateToMainPage(page, token) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// تسريع الفيديوهات (أقوى ما يمكن)
+// تسريع ساعة اللعبة الداخلية (RAF + performance.now + Timers)
+// ═══════════════════════════════════════════════════════════════
+async function installTimeAccelerator(page, rafScale = RAF_SCALE, timerScale = TIMER_SCALE) {
+    await page.evaluateOnNewDocument((rafScale, timerScale) => {
+        if (window.__timeAccelInstalled) return;
+        window.__timeAccelInstalled = true;
+        window.__rafScale = rafScale;
+        window.__timerScale = timerScale;
+
+        // 1) RAF — يمرر الوقت داخل callback بسرعة rafScale
+        const _raf = window.requestAnimationFrame.bind(window);
+        const _now = performance.now.bind(performance);
+        const t0 = _now();
+        window.requestAnimationFrame = (cb) =>
+            _raf((t) => cb(t0 + (t - t0) * rafScale));
+
+        // 2) performance.now — محركات الألعاب تعتمد عليه لحساب deltaTime
+        try {
+            Object.defineProperty(performance, 'now', {
+                configurable: true,
+                value: () => t0 + (_now() - t0) * rafScale
+            });
+        } catch (e) {}
+
+        // 3) setTimeout / setInterval — يُقصّر كل عدّاد (مثل "3 ثواني قبل الرمية")
+        const _setTimeout  = window.setTimeout;
+        const _setInterval = window.setInterval;
+
+        window.setTimeout = function (fn, ms, ...args) {
+            const d = typeof ms === 'number' ? ms : 0;
+            return _setTimeout(fn, Math.max(0, d / timerScale), ...args);
+        };
+        window.setInterval = function (fn, ms, ...args) {
+            const d = typeof ms === 'number' ? ms : 0;
+            return _setInterval(fn, Math.max(1, d / timerScale), ...args);
+        };
+
+        console.log(`⏩ مُسرِّع الوقت: RAF×${rafScale}, Timers×${timerScale}`);
+    }, rafScale, timerScale);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// تسريع الفيديوهات — عنيف جداً
 // ═══════════════════════════════════════════════════════════════
 async function installVideoSkip(page) {
     if (!SKIP_VIDEOS) return;
     await page.evaluateOnNewDocument(() => {
         window.__videosSkipped = 0;
+        const done = new WeakSet();
 
-        const fast = (v) => {
+        const nuke = (v) => {
+            if (!v || done.has(v)) return;
+            done.add(v);
+            window.__videosSkipped++;
             try {
                 v.muted = true;
-                v.playbackRate = 16;
-                const dur = v.duration;
-                if (isFinite(dur) && dur > 0) {
-                    // اقفز للنهاية فوراً
-                    v.currentTime = dur;
-                }
+                try { v.playbackRate = 16; } catch (e) {}
+                try { v.playbackRate = 100; } catch (e) {}
+                try { v.defaultPlaybackRate = 100; } catch (e) {}
+
+                const jump = () => {
+                    try {
+                        const d = v.duration;
+                        if (isFinite(d) && d > 0) {
+                            if (v.currentTime < d) v.currentTime = d;
+                        } else {
+                            v.currentTime = 1e9;
+                        }
+                    } catch (e) {}
+                };
+                jump();
+
+                let n = 0;
+                const iv = setInterval(() => { jump(); if (++n > 200) clearInterval(iv); }, 10);
+
+                setTimeout(() => {
+                    try {
+                        v.dispatchEvent(new Event('ended', { bubbles: true }));
+                        v.dispatchEvent(new Event('timeupdate', { bubbles: true }));
+                        v.dispatchEvent(new Event('canplaythrough', { bubbles: true }));
+                    } catch (e) {}
+                }, 30);
             } catch (e) {}
         };
 
-        const hook = (v) => {
-            if (!v || v.__fastHooked) return;
-            v.__fastHooked = true;
-            window.__videosSkipped++;
-            ['loadedmetadata', 'canplay', 'play', 'playing', 'timeupdate'].forEach(ev =>
-                v.addEventListener(ev, () => fast(v), { passive: true })
-            );
-            fast(v);
+        const _play = HTMLMediaElement.prototype.play;
+        HTMLMediaElement.prototype.play = function () {
+            if (this.tagName === 'VIDEO') { nuke(this); return Promise.resolve(); }
+            return _play.apply(this, arguments);
         };
 
-        const origPlay = HTMLMediaElement.prototype.play;
-        HTMLMediaElement.prototype.play = function() {
-            if (this.tagName === 'VIDEO') hook(this);
-            return origPlay.apply(this, arguments);
+        const _load = HTMLMediaElement.prototype.load;
+        HTMLMediaElement.prototype.load = function () {
+            const r = _load.apply(this, arguments);
+            if (this.tagName === 'VIDEO') nuke(this);
+            return r;
         };
 
-        // اعتراض إضافة عناصر الفيديو للـ DOM
-        const obs = new MutationObserver((muts) => {
-            for (const m of muts) {
-                for (const n of m.addedNodes) {
-                    if (n.tagName === 'VIDEO') hook(n);
-                    else if (n.querySelectorAll) n.querySelectorAll('video').forEach(hook);
+        try {
+            const d = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'autoplay');
+            if (d && d.set) Object.defineProperty(HTMLMediaElement.prototype, 'autoplay', {
+                configurable: true,
+                get: d.get,
+                set: function (val) { d.set.call(this, val); if (this.tagName === 'VIDEO') nuke(this); }
+            });
+        } catch (e) {}
+
+        try {
+            const d = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'currentTime');
+            if (d && d.set) Object.defineProperty(HTMLMediaElement.prototype, 'currentTime', {
+                configurable: true,
+                get: d.get,
+                set: function (val) {
+                    if (this.tagName === 'VIDEO') {
+                        try { d.set.call(this, 1e9); } catch (e) {}
+                    } else {
+                        d.set.call(this, val);
+                    }
                 }
-            }
-        });
-        obs.observe(document.documentElement || document, { childList: true, subtree: true });
+            });
+        } catch (e) {}
 
-        // فحص دوري سريع جداً
-        setInterval(() => document.querySelectorAll('video').forEach(hook), 50);
+        new MutationObserver((muts) => {
+            for (const m of muts) for (const nd of m.addedNodes) {
+                if (nd.nodeType !== 1) continue;
+                if (nd.tagName === 'VIDEO') nuke(nd);
+                else if (nd.querySelectorAll) nd.querySelectorAll('video').forEach(nuke);
+            }
+        }).observe(document.documentElement || document, { childList: true, subtree: true });
+
+        setInterval(() => {
+            document.querySelectorAll('video').forEach((v) => {
+                if (!done.has(v)) nuke(v);
+                else {
+                    try {
+                        const d = v.duration;
+                        if (isFinite(d) && d > 0 && v.currentTime < d - 0.01) v.currentTime = d;
+                    } catch (e) {}
+                }
+            });
+        }, 20);
     });
 }
 
@@ -509,7 +605,7 @@ async function installWebSocketMonitor(page) {
                 console.log(`🎮 WS اللعبة متصل #${M.connectCount}`);
             });
 
-            ws.addEventListener('close', (e) => {
+            ws.addEventListener('close', () => {
                 if (!isGameWs) return;
                 M.disconnectTime = Date.now();
                 M.disconnectCount++;
@@ -735,7 +831,6 @@ async function playOneRound(page1, page2, lobbyId) {
     lap('nav');
     await sleep(WAIT_AFTER_NAVIGATE);
 
-    // ⏱️ بداية القياس: لحظة الدخول للوبي
     const lobbyEntryTime = Date.now();
     console.log(`⏱️ [قياس] بدأ من لحظة الدخول للوبي`);
 
@@ -743,7 +838,6 @@ async function playOneRound(page1, page2, lobbyId) {
     await joinLobby(TOKEN_GUEST, lobbyId, "الضيف");
     await sleep(WAIT_AFTER_JOIN);
 
-    // 🔍 التحقق من العضويات
     console.log(`🔎 التحقق من أعضاء اللوبي...`);
     await sleep(VERIFY_MEMBERS_DELAY);
     const membersOk = await verifyOnlyOurAccounts(lobbyId);
@@ -804,7 +898,7 @@ async function playOneRound(page1, page2, lobbyId) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// RunContext — متصفح واحد فقط، سياقان معزولان
+// RunContext — متصفح واحد + سياقان معزولان
 // ═══════════════════════════════════════════════════════════════
 class RunContext {
     constructor() {
@@ -861,15 +955,12 @@ class RunContext {
     }
 
     async recreatePages() {
-        // إغلاق الصفحات القديمة
         if (this.page1) try { await this.page1.close(); } catch (e) {}
         if (this.page2) try { await this.page2.close(); } catch (e) {}
-        // إغلاق السياقات القديمة إن وُجدت
         if (this.ctx1) try { await this.ctx1.close(); } catch (e) {}
         if (this.ctx2) try { await this.ctx2.close(); } catch (e) {}
 
         console.log("📄 تجهيز الصفحات (سياقان معزولان)...");
-        // Puppeteer الحديث: createBrowserContext — الأقدم: createIncognitoBrowserContext
         const createCtx = this.browser.createBrowserContext
             ? () => this.browser.createBrowserContext()
             : () => this.browser.createIncognitoBrowserContext();
@@ -887,6 +978,9 @@ class RunContext {
         await this.page1.setUserAgent(UA);
         await this.page2.setUserAgent(UA);
 
+        // ترتيب مهم: تسريع الوقت أولاً
+        await installTimeAccelerator(this.page1, RAF_SCALE, TIMER_SCALE);
+        await installTimeAccelerator(this.page2, RAF_SCALE, TIMER_SCALE);
         await installWebSocketMonitor(this.page1);
         await installWebSocketMonitor(this.page2);
         await installVideoSkip(this.page1);
@@ -900,7 +994,6 @@ class RunContext {
         try { if (this.browser) await this.browser.close(); } catch (e) {}
     }
 
-    // 🔁 إعادة تشغيل ناعمة — لا تغلق المتصفح
     async softRestart() {
         console.log("\n♻️ إعادة تشغيل ناعمة (بدون إغلاق المتصفح)...");
         try { await this.recreateSessions(); } catch (e) {
@@ -981,7 +1074,6 @@ async function runForever() {
 
             const result = await playOneRound(ctx.page1, ctx.page2, lobbyId);
 
-            // حالة وجود غريب: ننشئ لوبي جديد فوراً
             if (result.reason === 'stranger_in_lobby') {
                 console.log(`🔁 لوبي ملوّث بغريب → إنشاء لوبي جديد مباشرة`);
                 const setup = await createLobbySmart(TOKEN_HOST, null);
