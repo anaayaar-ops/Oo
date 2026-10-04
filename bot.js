@@ -36,7 +36,7 @@ const SKIP_VIDEOS = true;
 // ═══════════════════════════════════════════════════════════════
 // مُسرِّع الوقت داخل اللعبة (Unity WebGL)
 // ═══════════════════════════════════════════════════════════════
-const TIME_SCALE = 5;
+const TIME_SCALE = 3;
 
 // ═══════════════════════════════════════════════════════════════
 // إعدادات اللعبة
@@ -54,7 +54,7 @@ const GUEST_DRAG_FROM = { x: 300, y: 338 };
 const GUEST_DRAG_TO   = { x: 264, y: 470 };
 const HOST_DRAG_FROM  = { x: 300, y: 338 };
 const HOST_DRAG_TO    = { x: 264, y: 300 };
-const DRAG_INTERVAL = 500; // كل ثانية سحب للحسابين
+const DRAG_INTERVAL = 250; // كل 250ms دورة سحب للحسابين (متوازي)
 
 // ═══════════════════════════════════════════════════════════════
 // رؤوس HTTP
@@ -483,7 +483,7 @@ async function installVideoSkip(page) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// WS Monitor — بدون تتبّع shots/events (لا حاجة للتعلّم)
+// WS Monitor
 // ═══════════════════════════════════════════════════════════════
 async function installWebSocketMonitor(page) {
     await page.evaluateOnNewDocument(() => {
@@ -611,16 +611,16 @@ async function injectData(page, token, userId, lobbyId) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// السحب — إحداثيات ثابتة
+// السحب — إحداثيات ثابتة (متوازي 100%)
 // ═══════════════════════════════════════════════════════════════
 async function performDrag(page, accountName, fromX, fromY, toX, toY) {
     try {
         await page.mouse.move(fromX, fromY);
-        await sleep(100);
+        await sleep(60);
         await page.mouse.down();
-        await sleep(150);
-        await page.mouse.move(toX, toY, { steps: 12 });
-        await sleep(150);
+        await sleep(100);
+        await page.mouse.move(toX, toY, { steps: 8 });
+        await sleep(100);
         await page.mouse.up();
     } catch (e) {
         console.error(`[${accountName}] خطأ سحب:`, e.message);
@@ -628,13 +628,15 @@ async function performDrag(page, accountName, fromX, fromY, toX, toY) {
 }
 
 async function performFullCycle(pageGuest, pageHost) {
-    await performDrag(pageGuest, "الضيف",
-        GUEST_DRAG_FROM.x, GUEST_DRAG_FROM.y,
-        GUEST_DRAG_TO.x,   GUEST_DRAG_TO.y);
-    await sleep(60);
-    await performDrag(pageHost, "المنشئ",
-        HOST_DRAG_FROM.x, HOST_DRAG_FROM.y,
-        HOST_DRAG_TO.x,   HOST_DRAG_TO.y);
+    // ⚡ الاثنان معاً في نفس اللحظة — ما في انتظار تسلسلي
+    await Promise.all([
+        performDrag(pageGuest, "الضيف",
+            GUEST_DRAG_FROM.x, GUEST_DRAG_FROM.y,
+            GUEST_DRAG_TO.x,   GUEST_DRAG_TO.y),
+        performDrag(pageHost, "المنشئ",
+            HOST_DRAG_FROM.x, HOST_DRAG_FROM.y,
+            HOST_DRAG_TO.x,   HOST_DRAG_TO.y)
+    ]);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -659,13 +661,14 @@ async function waitForGameStart(page1, page2, maxWait) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// حلقة اللعب — سحب ثابت حتى نهاية المباراة
+// حلقة اللعب — سحب متوازي بدون حجب الحلقة
 // ═══════════════════════════════════════════════════════════════
 async function waitForGameEnd(page1, page2, maxWait) {
     console.log(`🎮 اللعب حتى النهاية...`);
     const start = Date.now();
     let drags = 0;
     let lastDragTime = 0;
+    let inFlight = false;
 
     while (Date.now() - start < maxWait) {
         const m = await getMonitor(page1);
@@ -675,23 +678,25 @@ async function waitForGameEnd(page1, page2, maxWait) {
             await sleep(END_CONFIRM_WAIT);
             const m2 = await getMonitor(page1);
             if (m2 && !m2.connected && m2.disconnectCount >= 1) {
-                console.log(`🏆 انتهت اللعبة (${drags} سحب، ${((Date.now()-start)/1000).toFixed(1)}s)`);
+                console.log(`🏆 انتهت اللعبة (${drags} دورة، ${((Date.now()-start)/1000).toFixed(1)}s)`);
                 return { ended: true, drags };
             }
         }
 
-        if (m.connected) {
+        if (m.connected && !inFlight) {
             const now = Date.now();
             if (now - lastDragTime >= DRAG_INTERVAL) {
                 lastDragTime = now;
                 drags++;
-                await performFullCycle(page2, page1);
+                inFlight = true;
+                // ⚡ نطلق الدورة بدون حجب الحلقة — نرجع نراقب فوراً
+                performFullCycle(page2, page1).finally(() => { inFlight = false; });
             }
         }
         await sleep(80);
     }
 
-    console.log(`⏹️ انتهت المدة (${drags} سحب)`);
+    console.log(`⏹️ انتهت المدة (${drags} دورة)`);
     return { ended: false, drags };
 }
 
@@ -746,8 +751,10 @@ async function playOneRound(page1, page2, lobbyId) {
     lap('inject');
     await sleep(WAIT_AFTER_INJECT);
 
-    await resetMonitor(page1);
-    await resetMonitor(page2);
+    await Promise.all([
+        resetMonitor(page1),
+        resetMonitor(page2)
+    ]);
 
     const started = await waitForGameStart(page1, page2, MAX_WAIT_START);
     lap('ws');
