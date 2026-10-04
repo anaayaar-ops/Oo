@@ -5,7 +5,7 @@ const os = require('os');
 const { loadTokens } = require('./token-loader.js');
 
 // ═══════════════════════════════════════════════════════════════
-// بيانات الحسابات (تُعبّأ من GitHub في الأسفل)
+// بيانات الحسابات
 // ═══════════════════════════════════════════════════════════════
 let TOKEN_HOST = '';
 let TOKEN_GUEST = '';
@@ -16,20 +16,25 @@ const GROUP_ID = 18432094;
 // ═══════════════════════════════════════════════════════════════
 // الإعدادات
 // ═══════════════════════════════════════════════════════════════
-const MIN_WAIT_AFTER_DISCONNECT = 1500;
+const MIN_WAIT_AFTER_DISCONNECT = 1200;
 const MAX_WAIT_START = 40000;
 const MAX_PLAY_TIME = 5 * 60 * 1000;
-const POLL_INTERVAL = 200;
+const POLL_INTERVAL = 150;
 const MAX_LOBBY_ATTEMPTS = 3;
 const MAX_STUCK_ATTEMPTS = 3;
-const WAIT_AFTER_NAVIGATE = 3000;
-const WAIT_AFTER_JOIN = 1000;
-const WAIT_AFTER_CLOSE = 2500;
-const WAIT_AFTER_INJECT = 1000;
-const WAIT_AFTER_LEAVE = 2000;
+const WAIT_AFTER_NAVIGATE = 2200;
+const WAIT_AFTER_JOIN = 700;
+const WAIT_AFTER_CLOSE = 2000;
+const WAIT_AFTER_INJECT = 700;
+const WAIT_AFTER_LEAVE = 1200;
+const END_CONFIRM_WAIT = 2500;
+const MIN_DRAGS_FOR_REAL_GAME = 5;
+const VERIFY_MEMBERS_DELAY = 800;   // انتظار قبل التحقق من العضويات
+
+const SKIP_VIDEOS = true;
 
 // ═══════════════════════════════════════════════════════════════
-// إعدادات اللعبة (Penalty Shootout / Golden Goal)
+// إعدادات اللعبة
 // ═══════════════════════════════════════════════════════════════
 const EXPERIENCE_ID = 9;
 const LOBBY_TYPE_ID = 13;
@@ -38,13 +43,75 @@ const EXPERIENCE_PATH = `/experience/golden_goal/${EXPERIENCE_BUILD_VERSION}/ind
 const LOBBY_DISPLAY_NAME = "ㅤ⚽ Penalty Shootout ㅤ";
 
 // ═══════════════════════════════════════════════════════════════
-// إحداثيات السحب (بدل النقرات)
+// السحب
 // ═══════════════════════════════════════════════════════════════
 const GUEST_DRAG_FROM = { x: 300, y: 338 };
-const GUEST_DRAG_TO   = { x: 264, y: 470 };
+const GUEST_DY = 132;
 const HOST_DRAG_FROM  = { x: 300, y: 338 };
 const HOST_DRAG_TO    = { x: 264, y: 300 };
-const DRAG_INTERVAL = 500; // كل 3 ثوان سحب للحسابين
+const DRAG_INTERVAL = 500;
+
+// ═══════════════════════════════════════════════════════════════
+// المتعلّم
+// ═══════════════════════════════════════════════════════════════
+const ARMS = [-18, -12, -6, 0, 6, 12, 15, 18];
+const STATS_FILE = path.join(__dirname, 'learner-stats.json');
+const stats = new Map(ARMS.map(a => [a, { w: 0, l: 0 }]));
+stats.set(15, { w: 4, l: 1 });
+stats.set(12, { w: 0, l: 0 });
+stats.set(0,  { w: 1, l: 2 });
+
+try {
+    const saved = JSON.parse(fs.readFileSync(STATS_FILE, 'utf8'));
+    for (const [k, v] of Object.entries(saved)) if (stats.has(Number(k))) stats.set(Number(k), v);
+    console.log('📚 تم تحميل إحصاءات سابقة للمتعلّم');
+} catch (e) {}
+
+let currentArm = 15;
+const pendingShots = [];
+
+const armMean = (a) => { const s = stats.get(a); return (s.w + 1) / (s.w + s.l + 2); };
+const totalShots = () => [...stats.values()].reduce((n, s) => n + s.w + s.l, 0);
+
+function pickArm() {
+    const eps = totalShots() < 30 ? 0.3 : 0.1;
+    if (Math.random() < eps) return ARMS[Math.floor(Math.random() * ARMS.length)];
+    return ARMS.reduce((b, a) => armMean(a) > armMean(b) ? a : b);
+}
+
+function armTarget(a) {
+    const dx = -Math.round(GUEST_DY * Math.tan(a * Math.PI / 180));
+    return { x: GUEST_DRAG_FROM.x + dx, y: GUEST_DRAG_FROM.y + GUEST_DY };
+}
+
+function learn(ang, outcome) {
+    const arm = ARMS.reduce((b, a) => Math.abs(a - ang) < Math.abs(b - ang) ? a : b);
+    const s = stats.get(arm);
+    if (outcome === 'goal') s.w++; else s.l++;
+    console.log(`   📊 ${ang.toFixed(0)}° → ${outcome} | ` +
+        [...stats].map(([a, v]) => `${a}:${v.w}/${v.w + v.l}`).join(' '));
+    try { fs.writeFileSync(STATS_FILE, JSON.stringify(Object.fromEntries(stats))); } catch (e) {}
+    currentArm = pickArm();
+}
+
+async function pollShots(page) {
+    const r = await page.evaluate(() => {
+        const M = window.__gameMonitor; if (!M) return null;
+        const now = Date.now();
+        M.events = M.events.filter(e => now - e.t < 15000);
+        return { shots: M.shots.splice(0), events: M.events.slice(), now };
+    }).catch(() => null);
+    if (!r) return;
+    pendingShots.push(...r.shots);
+    for (let i = pendingShots.length - 1; i >= 0; i--) {
+        const s = pendingShots[i];
+        if (r.now - s.t < 2000) continue;
+        pendingShots.splice(i, 1);
+        const w = new Set(r.events.filter(e => e.t >= s.t && e.t <= s.t + 1500).map(e => e.type));
+        const outcome = w.has(65531) ? 'goal' : w.has(65493) ? 'save' : w.has(65499) ? 'wall' : 'out';
+        learn(Math.atan2(s.x, s.y) * 180 / Math.PI, outcome);
+    }
+}
 
 // ═══════════════════════════════════════════════════════════════
 // رؤوس HTTP
@@ -69,9 +136,6 @@ function deleteTempDir(dir) {
     try { if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true }); } catch (e) {}
 }
 
-// ═══════════════════════════════════════════════════════════════
-// تتبع اللوبيات العالقة
-// ═══════════════════════════════════════════════════════════════
 const _stuckLobbyAttempts = new Map();
 
 // ═══════════════════════════════════════════════════════════════
@@ -120,7 +184,50 @@ async function deleteSession(token, st) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// API: تفكيك اللوبي (حذف كامل للمالك + مغادرة الضيف)
+// API: التحقق من أعضاء اللوبي
+// ═══════════════════════════════════════════════════════════════
+async function getLobbyMembers(lobbyId) {
+    const urls = [
+        `https://experience.palringo.com/lobby/id/${lobbyId}`,
+        `https://experience.palringo.com/lobby/id/${lobbyId}/users`,
+        `https://experience.palringo.com/lobby/id/${lobbyId}/user`
+    ];
+    for (const url of urls) {
+        try {
+            const res = await fetch(url, {
+                headers: { ...baseHeaders, authorization: `Bearer ${TOKEN_HOST}` }
+            });
+            if (!res.ok) continue;
+            const data = await res.json();
+            // جرّب صيغ مختلفة للحقل
+            const arr = data.users || data.members || data.userList || data.players;
+            if (Array.isArray(arr)) {
+                return arr.map(u => Number(u.userId ?? u.id ?? u.user_id ?? 0)).filter(Boolean);
+            }
+            // أحياناً الحقل object
+            if (arr && typeof arr === 'object') {
+                return Object.values(arr).map(u => Number(u.userId ?? u.id ?? 0)).filter(Boolean);
+            }
+        } catch (e) {}
+    }
+    return null;
+}
+
+// يعيد: true = آمن، false = يوجد غريب، null = تعذّر التحقق
+async function verifyOnlyOurAccounts(lobbyId) {
+    const ids = await getLobbyMembers(lobbyId);
+    if (!ids) return null;
+    const ours = new Set([USER_ID_HOST, USER_ID_GUEST]);
+    const strangers = ids.filter(id => !ours.has(id));
+    if (strangers.length > 0) {
+        console.log(`⚠️ أعضاء غرباء في اللوبي: ${strangers.join(',')}`);
+        return false;
+    }
+    return true;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// API: تفكيك اللوبي
 // ═══════════════════════════════════════════════════════════════
 async function leaveFromBothAccounts(lobbyId) {
     console.log(`🚪 تفكيك اللوبي ${lobbyId}...`);
@@ -131,50 +238,28 @@ async function leaveFromBothAccounts(lobbyId) {
         "content-length": "0"
     };
 
-    // 1) الضيف: مغادرة عادية
-    try {
-        const r = await fetch(`https://experience.palringo.com/lobby/id/${lobbyId}/user`, {
+    await Promise.all([
+        fetch(`https://experience.palringo.com/lobby/id/${lobbyId}/user`, {
             method: "DELETE",
             headers: { ...baseHeaders, "authorization": `Bearer ${TOKEN_GUEST}` }
-        });
-        console.log(`   [الضيف] leave → ${r.status}`);
-    } catch (e) {}
+        }).then(r => console.log(`   [الضيف] leave → ${r.status}`)).catch(() => {}),
+        fetch(`https://experience.palringo.com/lobby/id/${lobbyId}`, {
+            method: "DELETE", headers: hostHeaders
+        }).then(r => console.log(`   [المنشئ] DELETE → ${r.status}`)).catch(() => {})
+    ]);
 
-    // 2) المالك: DELETE اللوبي بالكامل
-    try {
-        const r = await fetch(`https://experience.palringo.com/lobby/id/${lobbyId}`, {
-            method: "DELETE",
-            headers: hostHeaders
-        });
-        console.log(`   [المنشئ] DELETE /lobby → ${r.status}`);
-        if (r.status === 200 || r.status === 204) {
-            console.log(`   ✅ تم حذف اللوبي ${lobbyId}`);
-            await sleep(WAIT_AFTER_LEAVE);
-            return true;
-        }
-    } catch (e) {
-        console.log(`   ❌ DELETE /lobby: ${e.message}`);
-    }
-
-    // 3) المالك: close (احتياطي)
-    try {
-        const r = await fetch(`https://experience.palringo.com/lobby/id/${lobbyId}/close`, {
+    await Promise.all([
+        fetch(`https://experience.palringo.com/lobby/id/${lobbyId}/close`, {
             method: "POST", headers: hostHeaders
-        });
-        console.log(`   [المنشئ] close → ${r.status}`);
-    } catch (e) {}
-
-    // 4) المالك: leave (احتياطي)
-    try {
-        const r = await fetch(`https://experience.palringo.com/lobby/id/${lobbyId}/user`, {
+        }).then(r => console.log(`   [المنشئ] close → ${r.status}`)).catch(() => {}),
+        fetch(`https://experience.palringo.com/lobby/id/${lobbyId}/user`, {
             method: "DELETE",
             headers: { ...baseHeaders, "authorization": `Bearer ${TOKEN_HOST}` }
-        });
-        console.log(`   [المنشئ] leave → ${r.status}`);
-    } catch (e) {}
+        }).then(r => console.log(`   [المنشئ] leave → ${r.status}`)).catch(() => {})
+    ]);
 
     await sleep(WAIT_AFTER_LEAVE);
-    return false;
+    return true;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -219,9 +304,6 @@ async function closeLobby(token, lobbyId) {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════
-// API: Rematch — مرة واحدة فقط + معالجة code 55 / code 5
-// ═══════════════════════════════════════════════════════════════
 async function rematchLobby(token, lobbyId) {
     const headers = { ...baseHeaders, "authorization": `Bearer ${token}` };
     const body = JSON.stringify({ data: "", userData: "" });
@@ -237,17 +319,10 @@ async function rematchLobby(token, lobbyId) {
 
             console.log(`⚠️ Rematch فشل: ${res.status} code=${err.code} ${(err.message || '').slice(0, 100)}`);
 
-            if (err.code === 55) {
-                console.log(`💡 اللوبي ${lobbyId} مفتوح → نستخدمه مباشرة`);
-                return lobbyId;
-            }
-
+            if (err.code === 55) return lobbyId;
             if (err.code === 5) {
                 const m = (err.message || '').match(/Lobby, id (\d+)/);
-                if (m && m[1] === String(lobbyId)) {
-                    console.log(`💡 اللوبي ${lobbyId} هو العالق → نستخدمه`);
-                    return lobbyId;
-                }
+                if (m && m[1] === String(lobbyId)) return lobbyId;
             }
             return null;
         }
@@ -280,17 +355,12 @@ async function joinLobby(token, lobbyId, accountName = "guest") {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════
-// إنشاء لوبي ذكي — مع كشف الحلقة العالقة
-// ═══════════════════════════════════════════════════════════════
 async function createLobbySmart(token, oldLobbyId = null) {
     if (oldLobbyId) {
-        console.log(`🔄 Rematch (مرة واحدة) على ${oldLobbyId}...`);
+        console.log(`🔄 Rematch على ${oldLobbyId}...`);
         const newId = await rematchLobby(token, oldLobbyId);
-        if (newId) {
-            return { id: newId, usedRematch: true };
-        }
-        console.log(`⚠️ Rematch فشل → مغادرة فورية من الحسابين`);
+        if (newId) return { id: newId, usedRematch: true };
+        console.log(`⚠️ Rematch فشل → مغادرة فورية`);
         await leaveFromBothAccounts(oldLobbyId);
     }
 
@@ -311,17 +381,16 @@ async function createLobbySmart(token, oldLobbyId = null) {
         if (stuckId && errorMsg.includes('already in')) {
             const tries = (_stuckLobbyAttempts.get(stuckId) || 0) + 1;
             _stuckLobbyAttempts.set(stuckId, tries);
-            console.log(`⚠️ عالق في ${stuckId} (محاولة ${tries}/${MAX_STUCK_ATTEMPTS})`);
+            console.log(`⚠️ عالق في ${stuckId} (${tries}/${MAX_STUCK_ATTEMPTS})`);
 
             if (tries >= MAX_STUCK_ATTEMPTS) {
-                console.log(`🛑 فشل ${tries} مرات على نفس اللوبي → إعادة تشغيل كاملة`);
                 _stuckLobbyAttempts.delete(stuckId);
                 return null;
             }
             await leaveFromBothAccounts(stuckId);
         } else {
             console.log(`⚠️ محاولة ${i}: ${result.status} ${errorMsg.slice(0, 80)}`);
-            await sleep(2000);
+            await sleep(1500);
         }
     }
 
@@ -353,7 +422,59 @@ async function navigateToMainPage(page, token) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// WS Monitor — يراقب edgegap (سيرفر اللعبة)
+// تسريع الفيديوهات (أقوى ما يمكن)
+// ═══════════════════════════════════════════════════════════════
+async function installVideoSkip(page) {
+    if (!SKIP_VIDEOS) return;
+    await page.evaluateOnNewDocument(() => {
+        window.__videosSkipped = 0;
+
+        const fast = (v) => {
+            try {
+                v.muted = true;
+                v.playbackRate = 16;
+                const dur = v.duration;
+                if (isFinite(dur) && dur > 0) {
+                    // اقفز للنهاية فوراً
+                    v.currentTime = dur;
+                }
+            } catch (e) {}
+        };
+
+        const hook = (v) => {
+            if (!v || v.__fastHooked) return;
+            v.__fastHooked = true;
+            window.__videosSkipped++;
+            ['loadedmetadata', 'canplay', 'play', 'playing', 'timeupdate'].forEach(ev =>
+                v.addEventListener(ev, () => fast(v), { passive: true })
+            );
+            fast(v);
+        };
+
+        const origPlay = HTMLMediaElement.prototype.play;
+        HTMLMediaElement.prototype.play = function() {
+            if (this.tagName === 'VIDEO') hook(this);
+            return origPlay.apply(this, arguments);
+        };
+
+        // اعتراض إضافة عناصر الفيديو للـ DOM
+        const obs = new MutationObserver((muts) => {
+            for (const m of muts) {
+                for (const n of m.addedNodes) {
+                    if (n.tagName === 'VIDEO') hook(n);
+                    else if (n.querySelectorAll) n.querySelectorAll('video').forEach(hook);
+                }
+            }
+        });
+        obs.observe(document.documentElement || document, { childList: true, subtree: true });
+
+        // فحص دوري سريع جداً
+        setInterval(() => document.querySelectorAll('video').forEach(hook), 50);
+    });
+}
+
+// ═══════════════════════════════════════════════════════════════
+// WS Monitor
 // ═══════════════════════════════════════════════════════════════
 async function installWebSocketMonitor(page) {
     await page.evaluateOnNewDocument(() => {
@@ -366,15 +487,17 @@ async function installWebSocketMonitor(page) {
             recvCount: 0,
             sendCount: 0,
             connected: false,
-            allWsUrls: []
+            allWsUrls: [],
+            events: [],
+            shots: []
         };
+
         const OrigWS = window.WebSocket;
         window.WebSocket = function(url, protocols) {
             const M = window.__gameMonitor;
             const isGameWs = /edgegap\.net/i.test(url);
 
             M.allWsUrls.push({ url, isGameWs, t: Date.now() });
-            console.log(`🔌 ${isGameWs ? '🎮 GAME' : '⚙️ LOBBY'}: ${url.slice(0, 60)}...`);
 
             const ws = new OrigWS(url, protocols);
 
@@ -383,7 +506,7 @@ async function installWebSocketMonitor(page) {
                 M.connectTime = Date.now();
                 M.connectCount++;
                 M.connected = true;
-                console.log(`🎮 [${((Date.now()-M.startTime)/1000).toFixed(1)}s] WS اللعبة متصل #${M.connectCount}`);
+                console.log(`🎮 WS اللعبة متصل #${M.connectCount}`);
             });
 
             ws.addEventListener('close', (e) => {
@@ -391,15 +514,44 @@ async function installWebSocketMonitor(page) {
                 M.disconnectTime = Date.now();
                 M.disconnectCount++;
                 M.connected = false;
-                console.log(`🏁 [${((Date.now()-M.startTime)/1000).toFixed(1)}s] WS اللعبة انفصل #${M.disconnectCount} code=${e.code}`);
+                console.log(`🏁 WS اللعبة انفصل #${M.disconnectCount}`);
             });
 
-            ws.addEventListener('message', () => { if (isGameWs) M.recvCount++; });
+            const noteEvent = (buf) => {
+                try {
+                    if (buf.byteLength >= 6) {
+                        const t = new DataView(buf).getUint16(4, true);
+                        if (t === 65493 || t === 65499 || t === 65531 || t === 65523)
+                            M.events.push({ t: Date.now(), type: t });
+                    }
+                } catch (_) {}
+            };
+
+            ws.addEventListener('message', (e) => {
+                if (!isGameWs) return;
+                M.recvCount++;
+                const d = e.data;
+                if (d instanceof ArrayBuffer) noteEvent(d);
+                else if (typeof Blob !== 'undefined' && d instanceof Blob) d.arrayBuffer().then(noteEvent).catch(() => {});
+            });
 
             const origSend = ws.send.bind(ws);
             ws.send = function(data) {
                 if (!isGameWs) return origSend(data);
                 M.sendCount++;
+                try {
+                    const u8 = data instanceof ArrayBuffer ? new Uint8Array(data)
+                        : ArrayBuffer.isView(data) ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength) : null;
+                    if (u8 && u8.length > 40 && u8[4] === 8 && u8[5] === 0) {
+                        const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+                        for (let i = 6; i < u8.length - 20; i++) {
+                            if (u8[i] === 0x2c && u8[i + 1] === 0x08) {
+                                M.shots.push({ t: Date.now(), x: dv.getFloat32(i + 7, true), y: dv.getFloat32(i + 11, true) });
+                                break;
+                            }
+                        }
+                    }
+                } catch (_) {}
                 return origSend(data);
             };
 
@@ -430,15 +582,18 @@ async function resetMonitor(page) {
     try {
         await page.evaluate(() => {
             if (window.__gameMonitor) {
-                window.__gameMonitor.connected = false;
-                window.__gameMonitor.connectCount = 0;
-                window.__gameMonitor.disconnectCount = 0;
-                window.__gameMonitor.connectTime = null;
-                window.__gameMonitor.disconnectTime = null;
-                window.__gameMonitor.recvCount = 0;
-                window.__gameMonitor.sendCount = 0;
-                window.__gameMonitor.allWsUrls = [];
-                window.__gameMonitor.startTime = Date.now();
+                const M = window.__gameMonitor;
+                M.connected = false;
+                M.connectCount = 0;
+                M.disconnectCount = 0;
+                M.connectTime = null;
+                M.disconnectTime = null;
+                M.recvCount = 0;
+                M.sendCount = 0;
+                M.allWsUrls = [];
+                M.events = [];
+                M.shots = [];
+                M.startTime = Date.now();
             }
         });
     } catch (e) {}
@@ -477,16 +632,16 @@ async function injectData(page, token, userId, lobbyId) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// السحب (بدل النقرات)
+// السحب
 // ═══════════════════════════════════════════════════════════════
 async function performDrag(page, accountName, fromX, fromY, toX, toY) {
     try {
         await page.mouse.move(fromX, fromY);
-        await sleep(150);
+        await sleep(100);
         await page.mouse.down();
-        await sleep(200);
-        await page.mouse.move(toX, toY, { steps: 15 });
-        await sleep(200);
+        await sleep(150);
+        await page.mouse.move(toX, toY, { steps: 12 });
+        await sleep(150);
         await page.mouse.up();
     } catch (e) {
         console.error(`[${accountName}] خطأ سحب:`, e.message);
@@ -494,38 +649,29 @@ async function performDrag(page, accountName, fromX, fromY, toX, toY) {
 }
 
 async function performFullCycle(pageGuest, pageHost) {
+    const to = armTarget(currentArm);
     await performDrag(pageGuest, "الضيف",
-        GUEST_DRAG_FROM.x, GUEST_DRAG_FROM.y,
-        GUEST_DRAG_TO.x,   GUEST_DRAG_TO.y);
-    await sleep(80);
+        GUEST_DRAG_FROM.x, GUEST_DRAG_FROM.y, to.x, to.y);
+    await sleep(60);
     await performDrag(pageHost, "المنشئ",
         HOST_DRAG_FROM.x, HOST_DRAG_FROM.y,
         HOST_DRAG_TO.x,   HOST_DRAG_TO.y);
 }
 
 // ═══════════════════════════════════════════════════════════════
-// انتظار بدء اللعبة (WS edgegap)
+// انتظار بدء اللعبة
 // ═══════════════════════════════════════════════════════════════
 async function waitForGameStart(page1, page2, maxWait) {
-    console.log(`⏳ انتظار بدء اللعبة (edgegap WS)...`);
+    console.log(`⏳ انتظار بدء اللعبة...`);
     const start = Date.now();
-    let lastLog = 0;
 
     while (Date.now() - start < maxWait) {
-        const m1 = await getMonitor(page1);
-        const m2 = await getMonitor(page2);
+        const [m1, m2] = await Promise.all([getMonitor(page1), getMonitor(page2)]);
         const m = m1?.connectCount > 0 ? m1 : (m2?.connectCount > 0 ? m2 : null);
 
         if (m && m.connected && m.connectCount >= 1) {
-            const elapsed = ((Date.now() - start) / 1000).toFixed(1);
-            console.log(`✅ بدأت اللعبة بعد ${elapsed}s`);
+            console.log(`✅ بدأت بعد ${((Date.now() - start) / 1000).toFixed(1)}s`);
             return true;
-        }
-
-        const elapsed = Math.floor((Date.now() - start) / 1000);
-        if (elapsed >= lastLog + 5) {
-            lastLog = elapsed;
-            console.log(`   [${elapsed}s] p1:${m1?.connected}|${m1?.connectCount} p2:${m2?.connected}|${m2?.connectCount}`);
         }
         await sleep(POLL_INTERVAL);
     }
@@ -534,25 +680,26 @@ async function waitForGameStart(page1, page2, maxWait) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// حلقة اللعب — سحب مستمر حتى انفصال WS
+// حلقة اللعب
 // ═══════════════════════════════════════════════════════════════
 async function waitForGameEnd(page1, page2, maxWait) {
     console.log(`🎮 اللعب حتى النهاية...`);
     const start = Date.now();
     let drags = 0;
-    let lastLog = 0;
     let lastDragTime = 0;
 
     while (Date.now() - start < maxWait) {
         const m = await getMonitor(page1);
-        if (!m) { await sleep(100); continue; }
+        if (!m) { await sleep(80); continue; }
+
+        await pollShots(page2);
 
         if (!m.connected && m.disconnectCount >= 1) {
-            await sleep(700);
+            await sleep(END_CONFIRM_WAIT);
             const m2 = await getMonitor(page1);
             if (m2 && !m2.connected && m2.disconnectCount >= 1) {
-                const elapsed = ((Date.now() - start) / 1000).toFixed(1);
-                console.log(`🏆 انتهت اللعبة (${drags} سحب، ${elapsed}s)`);
+                await pollShots(page2);
+                console.log(`🏆 انتهت اللعبة (${drags} سحب، ${((Date.now()-start)/1000).toFixed(1)}s)`);
                 return { ended: true, drags };
             }
         }
@@ -562,14 +709,10 @@ async function waitForGameEnd(page1, page2, maxWait) {
             if (now - lastDragTime >= DRAG_INTERVAL) {
                 lastDragTime = now;
                 drags++;
-                if (drags % 5 === 1) {
-                    const elapsed = Math.floor((Date.now() - start) / 1000);
-                    console.log(`   🎯 ${drags} سحب (${elapsed}s)`);
-                }
                 await performFullCycle(page2, page1);
             }
         }
-        await sleep(100);
+        await sleep(80);
     }
 
     console.log(`⏹️ انتهت المدة (${drags} سحب)`);
@@ -580,20 +723,45 @@ async function waitForGameEnd(page1, page2, maxWait) {
 // لعب جولة واحدة
 // ═══════════════════════════════════════════════════════════════
 async function playOneRound(page1, page2, lobbyId) {
+    const T = { s: Date.now() };
+    const lap = (k) => { T[k] = Date.now(); };
+    const d = (a, b) => ((T[b] - T[a]) / 1000).toFixed(1) + 's';
+
     console.log(`🌐 توجيه الصفحات للوبي ${lobbyId}...`);
     await Promise.all([
         navigateToLobby(page1, TOKEN_HOST, lobbyId),
         navigateToLobby(page2, TOKEN_GUEST, lobbyId)
     ]);
+    lap('nav');
     await sleep(WAIT_AFTER_NAVIGATE);
+
+    // ⏱️ بداية القياس: لحظة الدخول للوبي
+    const lobbyEntryTime = Date.now();
+    console.log(`⏱️ [قياس] بدأ من لحظة الدخول للوبي`);
 
     console.log(`🚪 انضمام الضيف...`);
     await joinLobby(TOKEN_GUEST, lobbyId, "الضيف");
     await sleep(WAIT_AFTER_JOIN);
 
-    console.log(`🎮 close (بدء اللعبة)...`);
+    // 🔍 التحقق من العضويات
+    console.log(`🔎 التحقق من أعضاء اللوبي...`);
+    await sleep(VERIFY_MEMBERS_DELAY);
+    const membersOk = await verifyOnlyOurAccounts(lobbyId);
+    if (membersOk === false) {
+        console.log(`🛑 يوجد لاعب غريب → خروج فوري`);
+        await leaveFromBothAccounts(lobbyId);
+        return { started: false, reason: 'stranger_in_lobby' };
+    }
+    if (membersOk === null) {
+        console.log(`⚠️ تعذر التحقق من الأعضاء → متابعة`);
+    } else {
+        console.log(`✅ الأعضاء صحيحون`);
+    }
+
+    console.log(`🎮 close...`);
     const closed = await closeLobby(TOKEN_HOST, lobbyId);
     if (!closed) return { started: false, reason: 'close_failed' };
+    lap('close');
     await sleep(WAIT_AFTER_CLOSE);
 
     console.log(`💉 حقن البيانات...`);
@@ -601,27 +769,49 @@ async function playOneRound(page1, page2, lobbyId) {
         injectData(page1, TOKEN_HOST, USER_ID_HOST, lobbyId),
         injectData(page2, TOKEN_GUEST, USER_ID_GUEST, lobbyId)
     ]);
+    lap('inject');
     await sleep(WAIT_AFTER_INJECT);
 
     await resetMonitor(page1);
     await resetMonitor(page2);
+    pendingShots.length = 0;
 
     const started = await waitForGameStart(page1, page2, MAX_WAIT_START);
-    if (!started) return { started: false, reason: 'no_ws' };
+    lap('ws');
+    if (!started) {
+        const totalTime = ((Date.now() - lobbyEntryTime) / 1000).toFixed(1);
+        console.log(`⏱️ [قياس] لم تبدأ — زمن من الدخول: ${totalTime}s`);
+        return { started: false, reason: 'no_ws', totalTime };
+    }
 
     const result = await waitForGameEnd(page1, page2, MAX_PLAY_TIME);
-    return { started: true, ended: result.ended, drags: result.drags };
+    lap('end');
+
+    const totalTime = ((Date.now() - lobbyEntryTime) / 1000).toFixed(1);
+    let vids = '-';
+    try { vids = await page2.evaluate(() => window.__videosSkipped || 0); } catch (e) {}
+
+    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+    console.log(`⏱️ الأزمنة: تحميل=${d('s','nav')} | →close=${d('nav','close')} | close→حقن=${d('close','inject')} | حقن→WS=${d('inject','ws')} | لعب=${d('ws','end')}`);
+    console.log(`🏁 ⏱️ الوقت الكلي من الدخول للوبي حتى نهاية المباراة: ${totalTime}s`);
+    console.log(`🎬 فيديوهات مُسرَّعة: ${vids}`);
+    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+
+    if (result.ended && result.drags < MIN_DRAGS_FOR_REAL_GAME) {
+        return { started: false, reason: 'too_short', totalTime };
+    }
+    return { started: true, ended: result.ended, drags: result.drags, totalTime };
 }
 
 // ═══════════════════════════════════════════════════════════════
-// RunContext
+// RunContext — متصفح واحد فقط، سياقان معزولان
 // ═══════════════════════════════════════════════════════════════
 class RunContext {
     constructor() {
-        this.browser1 = null;
-        this.browser2 = null;
-        this.tempDir1 = null;
-        this.tempDir2 = null;
+        this.browser = null;
+        this.tempDir = null;
+        this.ctx1 = null;
+        this.ctx2 = null;
         this.page1 = null;
         this.page2 = null;
         this.sessionHost = null;
@@ -629,21 +819,19 @@ class RunContext {
     }
 
     async init() {
-        this.tempDir1 = fs.mkdtempSync(path.join(os.tmpdir(), 'puppeteer-'));
-        this.tempDir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'puppeteer-'));
+        this.tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'puppeteer-'));
 
-        console.log("🚀 فتح المتصفحين...");
-        this.browser1 = await puppeteer.launch({
-            headless: 'new', userDataDir: this.tempDir1,
-            args: ['--disable-web-security', '--no-sandbox', '--disable-setuid-sandbox',
-                   '--window-size=600,600', '--disable-session-crashed-bubble',
-                   '--disable-features=TranslateUI', '--disable-dev-shm-usage']
-        });
-        this.browser2 = await puppeteer.launch({
-            headless: 'new', userDataDir: this.tempDir2,
-            args: ['--disable-web-security', '--no-sandbox', '--disable-setuid-sandbox',
-                   '--window-size=600,600', '--disable-session-crashed-bubble',
-                   '--disable-features=TranslateUI', '--disable-dev-shm-usage']
+        console.log("🚀 فتح المتصفح (واحد فقط)...");
+        this.browser = await puppeteer.launch({
+            headless: 'new',
+            userDataDir: this.tempDir,
+            args: [
+                '--disable-web-security', '--no-sandbox', '--disable-setuid-sandbox',
+                '--window-size=600,600', '--disable-session-crashed-bubble',
+                '--disable-features=TranslateUI', '--disable-dev-shm-usage',
+                '--autoplay-policy=no-user-gesture-required',
+                '--mute-audio'
+            ]
         });
 
         await this.recreateSessions();
@@ -658,61 +846,69 @@ class RunContext {
         for (let i = 1; i <= 5; i++) {
             this.sessionHost = await createSession(TOKEN_HOST, "المنشئ");
             if (this.sessionHost) break;
-            console.log(`⚠️ فشل جلسة المنشئ (${i}/5) → انتظار 10s`);
-            await sleep(10000);
+            console.log(`⚠️ فشل جلسة المنشئ (${i}/5)`);
+            await sleep(6000);
         }
         if (!this.sessionHost) throw new Error("فشل جلسة المنشئ");
 
         for (let i = 1; i <= 5; i++) {
             this.sessionGuest = await createSession(TOKEN_GUEST, "الضيف");
             if (this.sessionGuest) break;
-            console.log(`⚠️ فشل جلسة الضيف (${i}/5) → انتظار 10s`);
-            await sleep(10000);
+            console.log(`⚠️ فشل جلسة الضيف (${i}/5)`);
+            await sleep(6000);
         }
         if (!this.sessionGuest) throw new Error("فشل جلسة الضيف");
     }
 
     async recreatePages() {
+        // إغلاق الصفحات القديمة
         if (this.page1) try { await this.page1.close(); } catch (e) {}
         if (this.page2) try { await this.page2.close(); } catch (e) {}
+        // إغلاق السياقات القديمة إن وُجدت
+        if (this.ctx1) try { await this.ctx1.close(); } catch (e) {}
+        if (this.ctx2) try { await this.ctx2.close(); } catch (e) {}
 
-        console.log("📄 تجهيز الصفحات...");
-        this.page1 = await this.browser1.newPage();
-        this.page2 = await this.browser2.newPage();
+        console.log("📄 تجهيز الصفحات (سياقان معزولان)...");
+        // Puppeteer الحديث: createBrowserContext — الأقدم: createIncognitoBrowserContext
+        const createCtx = this.browser.createBrowserContext
+            ? () => this.browser.createBrowserContext()
+            : () => this.browser.createIncognitoBrowserContext();
+
+        this.ctx1 = await createCtx();
+        this.ctx2 = await createCtx();
+
+        const UA = 'Mozilla/5.0 (Linux; Android 13; NTH-NX9 Build/HONORNTH-N29; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/150.0.7871.124 Mobile Safari/537.36';
+
+        this.page1 = await this.ctx1.newPage();
+        this.page2 = await this.ctx2.newPage();
+
         await this.page1.setViewport({ width: 600, height: 600 });
         await this.page2.setViewport({ width: 600, height: 600 });
-        await this.page1.setUserAgent('Mozilla/5.0 (Linux; Android 13; NTH-NX9 Build/HONORNTH-N29; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/150.0.7871.124 Mobile Safari/537.36');
-        await this.page2.setUserAgent('Mozilla/5.0 (Linux; Android 13; NTH-NX9 Build/HONORNTH-N29; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/150.0.7871.124 Mobile Safari/537.36');
+        await this.page1.setUserAgent(UA);
+        await this.page2.setUserAgent(UA);
+
         await installWebSocketMonitor(this.page1);
         await installWebSocketMonitor(this.page2);
+        await installVideoSkip(this.page1);
+        await installVideoSkip(this.page2);
     }
 
     async cleanup() {
         if (this.sessionHost) try { await deleteSession(TOKEN_HOST, this.sessionHost); } catch (e) {}
         if (this.sessionGuest) try { await deleteSession(TOKEN_GUEST, this.sessionGuest); } catch (e) {}
-        if (this.tempDir1) deleteTempDir(this.tempDir1);
-        if (this.tempDir2) deleteTempDir(this.tempDir2);
-        try { if (this.browser1) await this.browser1.close(); } catch (e) {}
-        try { if (this.browser2) await this.browser2.close(); } catch (e) {}
+        if (this.tempDir) deleteTempDir(this.tempDir);
+        try { if (this.browser) await this.browser.close(); } catch (e) {}
     }
 
-    async fullRestart() {
-        console.log("\n🔁 إعادة تشغيل كاملة...");
-        const oldB1 = this.browser1, oldB2 = this.browser2;
-        const oldT1 = this.tempDir1, oldT2 = this.tempDir2;
-
-        this.browser1 = null; this.browser2 = null;
-        this.tempDir1 = null; this.tempDir2 = null;
-        this.page1 = null; this.page2 = null;
-        this.sessionHost = null; this.sessionGuest = null;
-
-        try { if (oldB1) await oldB1.close(); } catch (e) {}
-        try { if (oldB2) await oldB2.close(); } catch (e) {}
-        if (oldT1) deleteTempDir(oldT1);
-        if (oldT2) deleteTempDir(oldT2);
-
+    // 🔁 إعادة تشغيل ناعمة — لا تغلق المتصفح
+    async softRestart() {
+        console.log("\n♻️ إعادة تشغيل ناعمة (بدون إغلاق المتصفح)...");
+        try { await this.recreateSessions(); } catch (e) {
+            console.error("❌ فشل تجديد الجلسات:", e.message);
+            throw e;
+        }
+        await this.recreatePages();
         _stuckLobbyAttempts.clear();
-        await this.init();
     }
 }
 
@@ -743,12 +939,21 @@ async function runForever() {
         navigateToMainPage(ctx.page1, TOKEN_HOST),
         navigateToMainPage(ctx.page2, TOKEN_GUEST)
     ]);
-    await sleep(2000);
+    await sleep(1500);
 
     let lobbyId = null;
     let round = 0;
     let wins = 0;
     let consecutiveFailures = 0;
+
+    const softRestartAndReopen = async () => {
+        await ctx.softRestart();
+        await Promise.all([
+            navigateToMainPage(ctx.page1, TOKEN_HOST),
+            navigateToMainPage(ctx.page2, TOKEN_GUEST)
+        ]);
+        await sleep(1500);
+    };
 
     while (true) {
         try {
@@ -759,16 +964,11 @@ async function runForever() {
                     console.log(`⚠️ فشل إنشاء لوبي (${consecutiveFailures} متتالي)`);
 
                     if (consecutiveFailures >= 3) {
-                        console.log("🔁 إعادة تشغيل كاملة...");
-                        await ctx.fullRestart();
-                        await Promise.all([
-                            navigateToMainPage(ctx.page1, TOKEN_HOST),
-                            navigateToMainPage(ctx.page2, TOKEN_GUEST)
-                        ]);
-                        await sleep(2000);
+                        console.log("♻️ إعادة تشغيل ناعمة...");
+                        await softRestartAndReopen();
                         consecutiveFailures = 0;
                     } else {
-                        await sleep(5000);
+                        await sleep(3000);
                     }
                     continue;
                 }
@@ -781,13 +981,21 @@ async function runForever() {
 
             const result = await playOneRound(ctx.page1, ctx.page2, lobbyId);
 
-            // ═══ لم تبدأ اللعبة → نحاول تفكيك اللوبي والخروج ═══
+            // حالة وجود غريب: ننشئ لوبي جديد فوراً
+            if (result.reason === 'stranger_in_lobby') {
+                console.log(`🔁 لوبي ملوّث بغريب → إنشاء لوبي جديد مباشرة`);
+                const setup = await createLobbySmart(TOKEN_HOST, null);
+                lobbyId = setup ? setup.id : null;
+                if (setup) consecutiveFailures = 0;
+                else consecutiveFailures++;
+                continue;
+            }
+
             if (!result.started) {
-                console.log(`⚠️ فشل البدء (${result.reason}) → محاولة الخروج من اللوبي`);
+                console.log(`⚠️ فشل البدء (${result.reason})`);
                 await leaveFromBothAccounts(lobbyId);
 
                 consecutiveFailures++;
-
                 const setup = await createLobbySmart(TOKEN_HOST, null);
                 if (setup) {
                     lobbyId = setup.id;
@@ -795,12 +1003,7 @@ async function runForever() {
                 } else {
                     lobbyId = null;
                     if (consecutiveFailures >= 3) {
-                        await ctx.fullRestart();
-                        await Promise.all([
-                            navigateToMainPage(ctx.page1, TOKEN_HOST),
-                            navigateToMainPage(ctx.page2, TOKEN_GUEST)
-                        ]);
-                        await sleep(2000);
+                        await softRestartAndReopen();
                         consecutiveFailures = 0;
                     }
                 }
@@ -820,17 +1023,10 @@ async function runForever() {
                     lobbyId = fresh.id;
                     console.log(`♻️ لوبي جديد جاهز`);
                 } else {
-                    console.log("🛑 فشل الحصول على لوبي حتى بعد التنظيف → إعادة تشغيل كاملة");
-                    try {
-                        await ctx.fullRestart();
-                        await Promise.all([
-                            navigateToMainPage(ctx.page1, TOKEN_HOST),
-                            navigateToMainPage(ctx.page2, TOKEN_GUEST)
-                        ]);
-                        await sleep(2000);
-                    } catch (e) {
-                        console.error("❌ فشل إعادة التشغيل:", e.message);
-                        await sleep(15000);
+                    console.log("🛑 فشل الحصول على لوبي → إعادة تشغيل ناعمة");
+                    try { await softRestartAndReopen(); } catch (e) {
+                        console.error("❌ فشل:", e.message);
+                        await sleep(10000);
                     }
                     lobbyId = null;
                     consecutiveFailures = 0;
@@ -845,22 +1041,15 @@ async function runForever() {
             consecutiveFailures++;
 
             if (consecutiveFailures >= 3) {
-                console.log(`🔁 ${consecutiveFailures} إخفاقات → إعادة تشغيل كاملة...`);
-                try {
-                    await ctx.fullRestart();
-                    await Promise.all([
-                        navigateToMainPage(ctx.page1, TOKEN_HOST),
-                        navigateToMainPage(ctx.page2, TOKEN_GUEST)
-                    ]);
-                    await sleep(2000);
-                } catch (e) {
-                    console.error("❌ فشل إعادة التشغيل:", e.message);
-                    await sleep(15000);
+                console.log(`♻️ ${consecutiveFailures} إخفاقات → إعادة تشغيل ناعمة...`);
+                try { await softRestartAndReopen(); } catch (e) {
+                    console.error("❌ فشل:", e.message);
+                    await sleep(10000);
                 }
                 consecutiveFailures = 0;
                 lobbyId = null;
             } else {
-                await sleep(8000);
+                await sleep(5000);
             }
         }
     }
@@ -870,7 +1059,7 @@ async function runForever() {
 // نقطة البداية
 // ═══════════════════════════════════════════════════════════════
 (async () => {
-    console.log('📥 تحميل التوكنات من GitHub...');
+    console.log('📥 تحميل التوكنات...');
     try {
         const tokens = await loadTokens();
         TOKEN_HOST = tokens.TOKEN_HOST;
@@ -883,8 +1072,8 @@ async function runForever() {
     if (!TOKEN_HOST) throw new Error('❌ TOKEN_HOST مفقود');
     if (!TOKEN_GUEST) throw new Error('❌ TOKEN_GUEST مفقود');
 
-    console.log(`✅ TOKEN_HOST  (${USER_ID_HOST})  → ${TOKEN_HOST.slice(0, 10)}...`);
-    console.log(`✅ TOKEN_GUEST (${USER_ID_GUEST}) → ${TOKEN_GUEST.slice(0, 10)}...\n`);
+    console.log(`✅ TOKEN_HOST  (${USER_ID_HOST})  → ***${TOKEN_HOST.slice(-4)}`);
+    console.log(`✅ TOKEN_GUEST (${USER_ID_GUEST}) → ***${TOKEN_GUEST.slice(-4)}\n`);
 
     let attempt = 0;
     while (true) {
