@@ -43,7 +43,7 @@ const TIME_SCALE = 3;
 // ═══════════════════════════════════════════════════════════════
 const EXPERIENCE_ID = 9;
 const LOBBY_TYPE_ID = 13;
-const EXPERIENCE_BUILD_VERSION = "4.8.14";
+const EXPERIENCE_BUILD_VERSION = "5.3.1";
 const EXPERIENCE_PATH = `/experience/golden_goal/${EXPERIENCE_BUILD_VERSION}/index.html`;
 const LOBBY_DISPLAY_NAME = "ㅤ⚽ Penalty Shootout ㅤ";
 
